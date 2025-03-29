@@ -1,5 +1,9 @@
 '''
 This script demonstrates the implementation of the proposed method on a synthetic 1D dataset.
+
+Not fix \lambda a priori and try to find both together.
+
+Compute analytical solution of this LQR problem
 '''
 
 import numpy as np
@@ -16,16 +20,47 @@ def outer_p(z):
     v = p(z)
     return np.outer(v, v)
 
+def compute_analytical_Q_matrix(A=0.9, B=0.1, Q=1.0, R=1.0, gamma=0.9, basis_func=None, grid_size=1000):
+    assert basis_func is not None, "Pass your basis function p(z) as `basis_func`"
+
+    # Step 1: Solve scalar Riccati equation numerically
+    def riccati_fixed_point(P_prev):
+        denom = R + gamma * (B**2) * P_prev
+        return Q + gamma * (A**2) * P_prev - (gamma**2) * (A**2) * (B**2) * (P_prev**2) / denom
+
+    P = 1.0
+    for _ in range(100):
+        P = riccati_fixed_point(P)
+
+    # Step 2: Define Q(x, u)
+    def Q_true_fn(x, u):
+        x_next = A * x + B * u
+        return x**2 + u**2 + gamma * (x_next**2) * P
+
+    # Step 3: Generate dataset and fit to basis
+    x_vals = np.random.uniform(0, 10, size=grid_size)
+    u_vals = np.random.uniform(0, 10, size=grid_size)
+    Z = np.stack([x_vals, u_vals], axis=1)
+
+    Φ = np.stack([basis_func(z) for z in Z], axis=0)
+    Y = np.array([Q_true_fn(x, u) for x, u in Z])
+
+    # Fit using least squares
+    Q_vec, _, _, _ = np.linalg.lstsq(Φ, Y, rcond=None)
+    Q_mat = np.outer(Q_vec, np.ones_like(Q_vec)).reshape((Φ.shape[1], Φ.shape[1]))  # rank-1
+
+    return Q_mat, Q_true_fn
+
 # Step 2: Generate synthetic dataset
-N = 20
+N = 200
 np.random.seed(2025)
 X = np.random.uniform(0, 10, size=N)
 U = np.random.uniform(0, 10, size=N)
-X_plus = X + 0.1 * U  # toy dynamics: x+ = x + 0.1u
+X_plus = 0.9 * X + 0.1 * U  # toy dynamics: x+ = 0.9x + 0.1u
 W = np.random.uniform(0, 10, size=N)  # freely chosen
 L = X**2 + U**2  # toy cost function
 
-gamma = 0    # discount factor
+gamma = 0.9    # discount factor
 dim_p = len(p([X[0], U[0]]))  # = 6
 dim_vecQ = dim_p ** 2  # = 36
 
@@ -38,7 +73,7 @@ C_expr = sum([
 print("C(λ) shape:", C_expr.shape)
 # objective = cp.Maximize(cp.trace(C_expr))
 epsilon = 1e-3
-objective = cp.Maximize(cp.log_det(C_expr + epsilon * np.eye(dim_p)))
+objective = cp.Maximize(cp.log_det(C_expr + epsilon * np.eye(dim_p)))   # Regularize C(λ)
 constraints = [C_expr >> 0]
 prob = cp.Problem(objective, constraints)
 prob.solve()
@@ -103,7 +138,7 @@ constraints_lp = [
 
 objective = cp.Maximize(α @ vec_C_approx)
 lp = cp.Problem(objective, constraints_lp)
-lp.solve()
+lp.solve(solver=cp.SCS, verbose=False)
 
 print("Solved LP.")
 print("Optimal value:", lp.value)
@@ -119,3 +154,15 @@ def Q_function(x, u):
 # Optionally test the learned Q
 x_test, u_test = 0.5, -0.3
 print(f"Q({x_test}, {u_test}) =", Q_function(x_test, u_test))
+
+
+# Step 6: Compare with analytical solution
+Q_mat_true, Q_fn_true = compute_analytical_Q_matrix(basis_func=p)
+
+# Compute Frobenius error
+error = np.linalg.norm(Q_mat - Q_mat_true, ord='fro')
+print("Frobenius error to ground truth Q:", error)
+
+# Compare predictions
+print("Q_true(0.5, -0.3) =", Q_fn_true(0.5, -0.3))
+print("Q_learned(0.5, -0.3) =", Q_function(0.5, -0.3))
