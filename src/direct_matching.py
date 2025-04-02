@@ -1,6 +1,16 @@
 '''
 Determine λ and µ by directly matching the C(λ) and ∑ μ_i p(y_i)p(y_i)^T
 Then compares the learned Q matrix with the true Q matrix obtained by solving analytically the LQR problem.
+
+Still linear, but more general than the previous example.
+A and B more high dimensional 3x3. Uniform sampling of the state and action space.
+
+Making sure that the LP method is stable, i.e. if I choose A and B randomly but stabilizable and L positive semidefinite
+and L_uu positive definite, the value of the discount factor gamma, the learned Q function should be close to the true Q function.
+Plus with the number of samples N, the learned Q function should be close to the true Q function.
+
+How to set constraints on λ and μ?
+Make some plots to see if it is stable when changing the lower bounds.
 '''
 
 import numpy as np
@@ -9,7 +19,8 @@ import cvxpy as cp
 # Step 1: Define basis functions
 def p(z):
     x, u = z
-    return np.array([1, x, u, x**2, x*u, u**2])  # 6D basis
+    # return np.array([1, x, u, x**2, x*u, u**2])  # 6D basis
+    return np.array([x, u])
 
 def outer_p(z):
     v = p(z)
@@ -51,8 +62,10 @@ def compute_analytical_Q_matrix(A=0.9, B=0.1, gamma=0.9, L=np.eye(2), basis_func
     def Q_true_fn(x, u):
         x_next = A * x + B * u
         return x**2 + u**2 + gamma * (x_next**2) * P    # Q(x, u) = [x u]^T Q^* [x u] = [x u]^T * L * [x u] + gamma * x_next^T P x_next
-
-    return Q_true_fn
+    
+    # Step 3: Compute Q matrix
+    Q_matrix = L + gamma * np.array([[A, B]]) * P * np.array([[A, B]]).T
+    return Q_true_fn, Q_matrix
 
 
 # Step 2: Generate synthetic dataset
@@ -88,8 +101,8 @@ dim_vecQ = dim_p ** 2  # = 36
 
 # Step 3: Fix M and sample y_i
 M = N
-x_vals = np.random.uniform(-10, 10, size=M)
-u_vals = np.random.uniform(-1, 1, size=M)
+x_vals = np.random.uniform(Xmin, Xmax, size=M)
+u_vals = np.random.uniform(Umin, Umax, size=M)
 Y = np.stack([x_vals, u_vals], axis=1)
 
 # Step 4: Define optimization variables
@@ -111,7 +124,7 @@ C_mu_expr = sum([
 
 # Step 7: Define the optimization problem
 # Match C(λ) and ∑ μ_i p(y_i)p(y_i)^T
-delta = 1e-2
+delta = 1
 residual_matrix = C_lambda_expr - C_mu_expr
 objective = cp.Minimize(cp.norm(residual_matrix, "fro"))
 constraints = [λ >= 0, μ >= 0, cp.sum(λ) >= delta]      # Ensure λ is not all zeros
@@ -155,17 +168,22 @@ def Q_learned(x, u):
 print("Q_learned(0.5, -0.3):", Q_learned(0.5, -0.3))
 
 
-Q_fn_true = compute_analytical_Q_matrix(basis_func=p)
+Q_fn_true, Q_matrix = compute_analytical_Q_matrix(basis_func=p)
 print("Q_true(0.5, -0.3):", Q_fn_true(0.5, -0.3))
+
+# compare the two Q matrices cause now they are the same size
+# print("norm diff Q_learned and Q_true:", np.linalg.norm(Q_matrix - Q_mat))
+""" print("Q_learned matrix:\n", Q_mat)
+print("Q_true matrix:\n", Q_matrix) """
 
 # comparisons
 # MSE
 x = np.linspace(Xmin, Xmax, 100)
 u = np.linspace(Umin, Umax, 100)
-X_grid, U_grid = np.meshgrid(x, u)
-Q_learned_grid = np.array([[Q_learned(x, u) for u in U_grid[0]] for x in X_grid[:, 0]])
-Q_true_grid = np.array([[Q_fn_true(x, u) for u in U_grid[0]] for x in X_grid[:, 0]])
-mse = np.mean((Q_learned_grid - Q_true_grid) ** 2)
+# X_grid, U_grid = np.meshgrid(x, u)
+Q_learned_grid = np.array([[Q_learned(xi, ui) for ui in u] for xi in x])
+Q_true_grid = np.array([[Q_fn_true(xi, ui) for ui in u] for xi in x])
+mse = np.sqrt(np.mean((Q_learned_grid - Q_true_grid) ** 2))
 print("Mean Squared Error (MSE):", mse)
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -173,13 +191,13 @@ sns.set(style="whitegrid")
 plt.figure(figsize=(12, 6))
 plt.subplot(1, 2, 1)
 plt.title("Learned Q function")
-plt.contourf(X_grid, U_grid, Q_learned_grid, levels=50, cmap='viridis')
+plt.contourf(x, u, Q_learned_grid, levels=50, cmap='viridis')
 plt.colorbar(label='Q value')
 plt.xlabel('x')
 plt.ylabel('u')
 plt.subplot(1, 2, 2)
 plt.title("True Q function")
-plt.contourf(X_grid, U_grid, Q_true_grid, levels=50, cmap='viridis')
+plt.contourf(x, u, Q_true_grid, levels=50, cmap='viridis')
 plt.colorbar(label='Q value')
 plt.xlabel('x')
 plt.ylabel('u')
@@ -189,14 +207,19 @@ plt.show()
 # The MSE should be small if the learned Q function is accurate.
 # The contour plots should show similar shapes for the learned and true Q functions.
 
-
 # max absolute error
 max_error = np.max(np.abs(Q_learned_grid - Q_true_grid))
 print("Max absolute error:", max_error)
 
 max_error_index = np.unravel_index(np.argmax(np.abs(Q_learned_grid - Q_true_grid)), Q_learned_grid.shape)
 print("Max error index:", max_error_index)
-print("Max error x:", X_grid[max_error_index])
-print("Max error u:", U_grid[max_error_index])
+print("Max error x:", x[max_error_index[0]])
+print("Max error u:", u[max_error_index[1]])
+
+# max and min values of Q_learned and Q_true
+print("Max Q_learned:", np.max(Q_learned_grid))
+print("Min Q_learned:", np.min(Q_learned_grid))
+print("Max Q_true:", np.max(Q_true_grid))
+print("Min Q_true:", np.min(Q_true_grid))
 
 # errors accumulates at the edges of the state and action space. Why?
