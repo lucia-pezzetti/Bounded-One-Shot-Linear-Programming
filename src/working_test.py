@@ -1,6 +1,6 @@
 import numpy as np
 import cvxpy as cp
-from control.matlab import rss
+from control.matlab import drss
 
 def p(z):
     x, u = z
@@ -67,20 +67,25 @@ def is_stable(Q_true, Q_learned, tol=1e-2):
 def run_stability_test(num_trials=10, gamma_list=[0.7, 0.8, 0.9, 0.99]):
     results = []
 
-    for gamma in gamma_list:
-        for _ in range(num_trials):
+    for gamma in gamma_list:    # Loop over different gamma values to check stability
+        for _ in range(num_trials):     # Loop over different systems (i.e. randomly generated stable systems)
             # Step 1: Generate a random stable state-space system
-            # rss generates a random stable system with n states, m inputs, and p outputs
-            np.random.seed(2025)
-            
+            # rss generates a random discrete-time stable system with n states, m inputs, and p outputs
             n_states = 1  # Number of states
             m_inputs = 1  # Number of inputs
             p_outputs = 1  # Number of outputs
-            sys = rss(n_states, p_outputs, m_inputs)
+            sys = drss(n_states, p_outputs, m_inputs)
 
             # Extract A and B matrices
             A = sys.A
             B = sys.B
+
+            if np.abs(A) > 1:
+                print("A matrix is greater than 1. Skipping...")
+                continue
+
+            print("A:", A)
+            print("B:", B)
 
 
             # Step 2: Cost matrix          
@@ -99,7 +104,7 @@ def run_stability_test(num_trials=10, gamma_list=[0.7, 0.8, 0.9, 0.99]):
             # Step 4: Run your LP code (reuse core of your script but adapt A, B, gamma, L)
 
             # Modify sampled data
-            N = 500
+            N = 200
             X = np.random.uniform(Xmin, Xmax, size=(N, n_states))  # Shape (N, n_states)
             U = np.random.uniform(Umin, Umax, size=(N, m_inputs))  # Shape (N, m_inputs)
             X_next = np.clip((A @ X.T + B @ U.T).T, Xmin, Xmax)  # Ensure proper matrix multiplication
@@ -170,6 +175,8 @@ def run_stability_test(num_trials=10, gamma_list=[0.7, 0.8, 0.9, 0.99]):
 
     return results
 
+# set the random seed for reproducibility
+np.random.seed(2025)
 
 # state space
 Xmin = -10
