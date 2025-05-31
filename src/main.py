@@ -1,259 +1,204 @@
 import numpy as np
-from scipy.linalg import qr
+from scipy.linalg import solve_discrete_are
 import cvxpy as cp
 from sklearn.preprocessing import PolynomialFeatures
-from scipy.linalg import solve_discrete_are
 
-
-# ---------------------------------------------
-# 1. Problem setup and synthetic data creation
-# ---------------------------------------------
-# Dimensions
+# -------------------------
+# 1. Problem & Data Setup
+# -------------------------
 dx = 2     # state dimension
 du = 1     # input dimension
-degree = 1 # degree of monomial basis
-gamma = 0.9
+degree = 1 # degree of monomial basis 
+gamma = 0.99
 
 # Sample sizes
-N = 1000      # number of exploration samples
-N_off = 5000  # offline pool size
+N = 2000      # number of exploration samples
+M = 500       # offline pool size
 
-# Define simple linear dynamics for data generation
 A = np.array([[0.8, 0.1],
               [0.0, 0.9]])
 B = np.array([[1.0],
               [0.5]])
 
-# Optional: set seed for reproducibility
 np.random.seed(0)
 
 # Generate exploration data: x_i, u_i, x_i+, w_i
-x = np.random.randn(N, dx)
-u = np.random.randn(N, du)
-# noise = 0.1 * np.random.randn(N, dx)
+x = np.random.uniform(-10.0, 10.0, size=(N, dx))
+u = np.random.uniform(-10.0, 10.0, size=(N, du))
 x_next = x @ A.T + u @ B.T
-w = np.random.randn(N, du)
+w = np.random.uniform(-10.0, 10.0, size=(N, du))
 
-# Stack into z, z_next
+# z = [x, u],  z_next = [x_next, w]
 z = np.hstack([x, u])         # shape (N, dx+du)
 z_next = np.hstack([x_next, w])
 
-# -------------------------------------------------
-# 2. Feature map p(z): all monomials up to 'degree'
-# -------------------------------------------------
+# ----------------------------------------------
+# 2. Feature map p(z): all monomials up to ‘degree’
+# ----------------------------------------------
 poly = PolynomialFeatures(degree, include_bias=False)
-# Fit and transform on combined data to ensure estimator is fitted
+
+# Combine z and z_next to fit the PolynomialFeatures
 Z_all = np.vstack([z, z_next])         # shape (2N, dx+du)
 P_all = poly.fit_transform(Z_all)      # shape (2N, d)
 d = P_all.shape[1]                     # feature dimension
-D = d * (d + 1) // 2                   # # free entries in symmetric matrix
 
 # Split back into P_z and P_z_next
 P_z = P_all[:N]        # shape (N, d)
 P_z_next = P_all[N:]   # shape (N, d)
 
-# ---------------------------------------------------------
-# 3. Offline pool and pivoted-QR for selecting dictionary
-# ---------------------------------------------------------
-tilde_y = np.random.randn(N_off, dx + du)
-P_tilde = poly.transform(tilde_y)   # shape (N_off, d)
+# Build P_y for the offline pool y
+y = np.random.uniform(-10.0, 10.0, size=(M, dx + du))
+P_y = poly.transform(y)   # shape (M, d)
 
-# Build V: each column j is vec(p(tilde_y_j) p(tilde_y_j)^T)
-tri_idx = np.triu_indices(d)
-V = np.zeros((D, N_off))
-for j in range(N_off):
-    Mj = np.outer(P_tilde[j], P_tilde[j])
-    V[:, j] = Mj[tri_idx]
 
-# Pivoted QR to choose heavy columns
-Q, R, pivots = qr(V, pivoting=True)
-# Determine M by thresholding R's diagonal
-tol = 1e-6
-diagR = np.abs(np.diag(R))
-M = np.sum(diagR > tol)
-selected = pivots[:M]
+# =====================================================================
+# 3. Solve LP for λ and μ simultaneously (vectorized implementation)
+#    sum_i λ_i F_i = sum_j μ_j G_j  where F_i = p(z_i)p(z_i)ᵀ − γ p(z_i+)p(z_i+)ᵀ
+# =====================================================================
 
-# Extract the y_i's
-y = tilde_y[selected]       # shape (M, dx+du)
-P_y = P_tilde[selected]     # shape (M, d)
-# Precompute atom matrices G_j = p(y_j)p(y_j)^T
-G_atoms = [np.outer(P_y[j], P_y[j]) for j in range(M)]
+# Create CVXPY variables
+lambda_var = cp.Variable(N, nonneg=True)  # λ ∈ ℝ^N₊
+mu_var     = cp.Variable(M, nonneg=True)  # μ ∈ ℝ^M₊
 
-# ---------------------------------------------
-# 4. Build F_i = p(z_i)p(z_i)^T - gamma p(z_i+)p(z_i+)^T
-# ---------------------------------------------
-F_atoms = [np.outer(P_z[i], P_z[i]) - gamma * np.outer(P_z_next[i], P_z_next[i]) for i in range(N)]
+# Convert P_z, P_z_next, P_y into CVXPY Constants
+Pz_const       = cp.Constant(P_z)        # shape (N, d)
+Pz_next_const  = cp.Constant(P_z_next)   # shape (N, d)
+Py_const       = cp.Constant(P_y)        # shape (M, d)
 
-# -------------------------------------------------
-# 5. Solve LP for λ and μ simultaneously
-#    sum_i λ_i F_i = sum_j μ_j G_j
-# -------------------------------------------------
-# Decision variables
-lambda_var = cp.Variable(N, nonneg=True)
-mu_var = cp.Variable(M, nonneg=True)
+# Build the moment-match matrix in one shot:
+#    sum_i λ_i [P_z[i] P_z[i]ᵀ] = P_zᵀ · diag(λ) · P_z
+sum_PzPzT = Pz_const.T @ cp.diag(lambda_var) @ Pz_const            # shape (d, d)
+sum_PznPznT = Pz_next_const.T @ cp.diag(lambda_var) @ Pz_next_const  # shape (d, d)
+sum_PyPyT = Py_const.T @ cp.diag(mu_var) @ Py_const                 # shape (d, d)
 
-# Moment-matching equality constraint (matrix form)
-moment_match = sum(lambda_var[i] * F_atoms[i] for i in range(N)) - \
-                sum(mu_var[j]     * G_atoms[j] for j in range(M))
-constraints = [moment_match == 0]
+moment_match = sum_PzPzT - gamma * sum_PznPznT - sum_PyPyT   # shape (d, d)
 
-# Break scale invariance: enforce sum(lambda)=1 and match mu-weighted to identity
-# constraints += [cp.sum(lambda_var) == 1]
+constraints = []
+# Enforce moment_match == 0_(d×d)
+constraints += [ moment_match == np.zeros((d, d)) ]
+
+# Break scale-invariance:
+constraints += [ cp.sum(lambda_var) == 1 ]
+
+# Build C_approx = ∑ₘ μ_j [P_y[j] P_y[j]ᵀ] = P_yᵀ · diag(μ) · P_y
+C_approx = sum_PyPyT  # shape (d, d)
+
+# Objective: minimize ‖C_approx − I‖_F
 I_d = np.eye(d)
-C_approx = sum(mu_var[j] * G_atoms[j] for j in range(M))
+objective = cp.Minimize(cp.norm(C_approx - I_d, "fro"))
 
-# Objective: minimize Frobenius norm ||C_approx - I||_F
-objective = cp.Minimize(cp.norm(C_approx - I_d, 'fro'))
-
-# Solve LP
+# Solve LP #1
 prob = cp.Problem(objective, constraints)
-prob.solve(solver=cp.SCS)
+prob.solve(solver=cp.ECOS, feastol=1e-9, reltol=1e-9)
 
-print("Status:", prob.status)
+print("Status (LP for λ,μ):", prob.status)
 if prob.status in ["optimal", "optimal_inaccurate"]:
     lambda_vals = lambda_var.value
-    mu_vals = mu_var.value
-    print("||C_approx - I||_F:", np.linalg.norm(
-        sum(mu_vals[j] * G_atoms[j] for j in range(M)) - I_d, 'fro'))
-    print("Sum(lambda):", np.sum(lambda_vals))
+    mu_vals     = mu_var.value
+    # Reconstruct C_approx as a numeric matrix and report
+    C_num = P_y.T @ np.diag(mu_vals) @ P_y
+    print("||C_approx - I||_F:", np.linalg.norm(C_num - I_d, "fro"))
+    print("Sum(λ):", np.sum(lambda_vals))
     print("Nonzero μ count:", np.sum(mu_vals > 1e-6))
-    print("μ[:10]:", mu_vals[:10])
 else:
     print("No valid solution; status", prob.status)
 
-# ------------------------------------
-# 6. New LP: maximize α^T vec_C_approx subject to constraints
-# ------------------------------------
-# Helper to vectorize p(z)p(z)^T
-def outer_p(zu):
-    p = poly.transform(np.atleast_2d(zu)).ravel()
-    Mmat = np.outer(p, p)
-    return Mmat[np.triu_indices(d)]  # returns D-vector
+# Extract the final λ, μ
+λ = lambda_var.value            # shape (N,)
+μ = mu_var.value                # shape (M,)
+
+# Reconstruct M_lambda and M_mu for diagnostic
+M_lambda = P_z.T @ np.diag(λ) @ P_z - gamma * (P_z_next.T @ np.diag(λ) @ P_z_next)
+M_mu     = P_y.T @ np.diag(μ) @ P_y
+diff_mom = M_lambda - M_mu
+print("||M_lambda - M_mu||_F:", np.linalg.norm(diff_mom, "fro"))
+print("max|M_lambda - M_mu|:", np.max(np.abs(diff_mom)))
 
 
-# Toy cost L
-tmp_u = u.reshape(N, du)
-L = (x**2).sum(axis=1) + (tmp_u**2).sum(axis=1)
+# ===========================================================
+# 4. New LP: maximize αᵀ vec(C_approx) subject to constraints
+# ===========================================================
 
-# Decision variable α with bounds
-alpha = cp.Variable(D, nonneg=True)
-tri_idx = np.triu_indices(d)
-C_approx = C_approx.value
-vec_C_approx = cp.hstack([C_approx[i, j] for i, j in zip(*tri_idx)])
+C_val = P_y.T @ np.diag(μ) @ P_y           # shape (d, d)
+c_vec = C_val.flatten(order="C")          # shape (d²,)
 
-# Constraints: α^T [p(z_i)p(z_i)^T - γ p(z_i+)p(z_i+)^T]_vec ≤ L[i]
-constraints_lp = []
-for i in range(N):
-    v_diff = outer_p(np.hstack([x[i], u[i]])) - gamma * outer_p(np.hstack([x_next[i], w[i]]))
-    constraints_lp.append(alpha @ v_diff <= L[i])
+# Define Q_var ∈ ℝ^{d×d}, PSD, and its vectorized form
+Q_var     = cp.Variable((d, d), PSD=True)               # matrix variable
+Q_var_vec = cp.reshape(Q_var, (d * d,), order="C")     # flatten in row-major
 
-objective_lp = cp.Maximize(alpha @ vec_C_approx)
+# compute L_xu (toy cost) exactly as before:
+L_xu = (x**2).sum(axis=1) + (u**2).sum(axis=1)   # shape (N,)
 
-# Solve LP
+# Build a 3D array of shape (N, d, d) in one go, then flatten:
+F_3D = (P_z[:, :, None] * P_z[:, None, :]) - gamma * (P_z_next[:, :, None] * P_z_next[:, None, :])
+# Now reshape to (N, d*d), preserving row-major (“C”) ordering:
+F_mat = F_3D.reshape((N, d * d), order="C")     # shape (N, d²)
+
+# single vectorized constraint:
+constraints_lp = [ F_mat @ Q_var_vec <= L_xu ]
+
+# Objective: maximize c_vecᵀ · Q_var_vec
+objective_lp = cp.Maximize(c_vec @ Q_var_vec)
+
+# Solve LP #2
 prob_lp = cp.Problem(objective_lp, constraints_lp)
 try:
-    prob_lp.solve(solver=cp.SCS, verbose=False, max_iters=5000, eps=1e-4)
-    print("Status:", prob_lp.status)
+    prob_lp.solve(solver=cp.CVXOPT, abstol=1e-8, reltol=1e-8, feastol=1e-8, max_iters=10000)
+    print("Status (LP for Q):", prob_lp.status)
 except Exception as e:
-    print("Solver failed with error:", str(e))
+    print("Solver failed with error:", e)
 
-# Display results
+Q_learned_vec = Q_var_vec.value    # shape (d²,)
+Q_learned_mat = Q_learned_vec.reshape((d, d), order="C")  # shape (d, d)
+
+# Quick feasibility check on a few random i:
+for i0 in np.random.choice(N, size=5, replace=False):
+    Fi0 = (np.outer(P_z[i0], P_z[i0]) - gamma * np.outer(P_z_next[i0], P_z_next[i0]))
+    lhs = Fi0.flatten(order="C") @ Q_learned_vec
+    rhs = L_xu[i0]
+    print(f"i0={i0}, (Fᵢ Q) = {lhs:.6f}, Lᵢ = {rhs:.6f}, diff = {lhs - rhs:.6f}")
+
 print("New LP status:", prob_lp.status)
-print("Optimal α (first 10):", alpha.value[:10])
+print("Q_learned (feature‐space) matrix:\n", Q_learned_mat)
 
 
-# === True Q-function computation for LQR ===
-# def compute_optimal_q_function(A, B, Q, R):
-#     # Solve the discrete-time algebraic Riccati equation
-#     P = solve_discrete_are(A, B, Q, R)
+# ---------------------------------------------------
+# 7. Compare learned Q vs true Q (unchanged)
+# ---------------------------------------------------
+Q_cost = np.eye(dx)
+R_cost = np.eye(du)
 
-#     # Compute the optimal policy gain K
-#     K = np.linalg.inv(R + B.T @ P @ B) @ (B.T @ P @ A)
+# solve discrete‐ARE with discount → scale A,B
+A_disc = np.sqrt(gamma) * A
+B_disc = np.sqrt(gamma) * B
+P_true = solve_discrete_are(A_disc, B_disc, Q_cost, R_cost)
 
-#     # Q-function parameters
-#     def Q_function(x, u):
-#         x = np.asarray(x).reshape(-1, 1)
-#         u = np.asarray(u).reshape(-1, 1)
-#         next_x = A @ x + B @ u
-#         return float(x.T @ Q @ x + u.T @ R @ u + next_x.T @ P @ next_x)
+# true Q‐function in (x,u)
+def true_q(x_, u_):
+    x_col = x_.reshape(-1, 1)
+    u_col = u_.reshape(-1, 1)
+    cost_now = x_col.T @ Q_cost @ x_col + u_col.T @ R_cost @ u_col
+    x_next = A @ x_col + B @ u_col
+    cost_future = gamma * (x_next.T @ P_true @ x_next)
+    return (cost_now + cost_future).item()
 
-#     return Q_function, P, K
+# learned Q‐function in feature‐space
+def learned_q(x_, u_):
+    z_raw = np.hstack([x_, u_]).reshape(1, -1)    # shape (1, dx+du)
+    z_feat = poly.transform(z_raw)                # shape (1, d)
+    return (z_feat @ Q_learned_mat @ z_feat.T).item()
 
-# Q_cost = np.eye(dx)
-# R_cost = np.eye(du)
+# Test on 100 random points
+x_test = np.random.uniform(-10.0, 10.0, size=(100, dx))
+u_test = np.random.uniform(-10.0, 10.0, size=(100, du))
 
-# Q_func, P_opt, K_opt = compute_optimal_q_function(A, B, Q, R)
+# Also print the “true Q matrix” in the original x‐u space for reference
+L_aug  = np.eye(dx + du)
+AB_cat = np.concatenate((A, B), axis=1)      # shape (2, 3)
+Q_true_mat = L_aug + gamma * AB_cat.T @ P_true @ AB_cat
+print("true Q matrix (x,u) form:\n", Q_true_mat)
 
-# # === Recover Q matrix from alpha ===
-# def unvec_to_symmetric_mat(vec, dim, tri_idx):
-#     mat = np.zeros((dim, dim))
-#     mat[tri_idx] = vec
-#     mat[(tri_idx[1], tri_idx[0])] = vec
-#     return mat
-
-# Q_learned_mat = unvec_to_symmetric_mat(alpha.value, d, tri_idx)
-
-# # === Evaluate Q functions ===
-# def true_Q(z):
-#     return np.einsum('bi,ij,bj->b', z, Q_true_mat, z)
-
-# def learned_Q(z):
-#     pz = poly.transform(z)
-#     return np.einsum('bi,ij,bj->b', pz, Q_learned_mat, pz)
-
-# Q_true_vals = true_Q(z)
-# Q_learned_vals = learned_Q(z)
-
-# # trace_diff = np.trace((Q_learned_mat - Q_true_mat) @ (Q_learned_mat - Q_true_mat))
-# mse = np.mean((Q_true_vals - Q_learned_vals)**2)
-
-# # print("Trace of (Q_learned - Q_true)^2:", trace_diff)
-# print("Mean squared error over samples:", mse)
-
-Q = np.eye(dx)
-R = np.eye(du)
-
-# Solve for P
-P = solve_discrete_are(A, B, Q, R)
-
-# Define the true Q-function: Q(x, u) = x^T Q x + u^T R u + \gamma (Ax+Bu)^T P (Ax+Bu)
-def true_q(x, u):
-    x = x.reshape(-1, 1)
-    u = u.reshape(-1, 1)
-    xu_cost = x.T @ Q @ x + u.T @ R @ u
-    next_x = A @ x + B @ u
-    future_cost = gamma * (next_x.T @ P @ next_x)
-    return (xu_cost + future_cost).item()
-
-# ---------------------------------------------
-# 3. Fit a Q-function using polynomial features
-# ---------------------------------------------
-poly = PolynomialFeatures(degree=degree)
-Z = poly.fit_transform(np.hstack([x, u]))  # basis features for (x, u)
-y = np.array([true_q(x[i], u[i]) for i in range(N)])  # targets: true Q(x, u)
-
-# Solve least squares regression
-theta = np.linalg.lstsq(Z, y, rcond=None)[0]
-
-# Learned Q function
-def learned_q(xi, ui):
-    z_feat = poly.transform(np.hstack([xi, ui]).reshape(1, -1))
-    return (z_feat @ theta).item()
-
-
-# ---------------------------------------------
-# 4. Compare learned Q vs true Q
-# ---------------------------------------------
-x_test = np.random.randn(100, dx)
-u_test = np.random.randn(100, du)
-
-# Print learned and true Q values for comparison
-L = np.eye(dx + du)
-Q_true_mat = L + gamma * np.concatenate((A, B), axis=1).T @ P @ np.concatenate((A, B), axis=1)
-print("true Q matrix:\n", Q_true_mat)
-
-true_vals = np.array([true_q(x_test[i], u_test[i]) for i in range(100)])
+true_vals    = np.array([true_q(x_test[i], u_test[i])     for i in range(100)])
 learned_vals = np.array([learned_q(x_test[i], u_test[i]) for i in range(100)])
-
-mse = np.mean((true_vals - learned_vals)**2)
+mse = np.mean((true_vals - learned_vals) ** 2)
 print(f"Mean Squared Error between true Q and learned Q: {mse:.2e}")
