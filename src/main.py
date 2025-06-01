@@ -15,10 +15,10 @@ gamma = 0.99
 N = 2000      # number of exploration samples
 M = 500       # offline pool size
 
-A = np.array([[0.8, 0.1],
-              [0.0, 0.9]])
-B = np.array([[1.0],
-              [0.5]])
+A = np.array([[-0.128308,   0.40262567],
+ [-1.42454314, -0.51783493]])
+B = np.array([[-0.76709544],
+ [-0.50440709]])
 
 np.random.seed(0)
 
@@ -89,7 +89,7 @@ objective = cp.Minimize(cp.norm(C_approx - I_d, "fro"))
 
 # Solve LP #1
 prob = cp.Problem(objective, constraints)
-prob.solve(solver=cp.ECOS, feastol=1e-9, reltol=1e-9)
+prob.solve(solver=cp.MOSEK, mosek_params={})
 
 print("Status (LP for λ,μ):", prob.status)
 if prob.status in ["optimal", "optimal_inaccurate"]:
@@ -143,7 +143,7 @@ objective_lp = cp.Maximize(c_vec @ Q_var_vec)
 # Solve LP #2
 prob_lp = cp.Problem(objective_lp, constraints_lp)
 try:
-    prob_lp.solve(solver=cp.CVXOPT, abstol=1e-8, reltol=1e-8, feastol=1e-8, max_iters=10000)
+    prob_lp.solve(solver=cp.MOSEK, mosek_params={})
     print("Status (LP for Q):", prob_lp.status)
 except Exception as e:
     print("Solver failed with error:", e)
