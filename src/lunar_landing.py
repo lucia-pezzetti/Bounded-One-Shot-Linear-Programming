@@ -2,59 +2,108 @@ import numpy as np
 from scipy.linalg import solve_discrete_are
 import cvxpy as cp
 from sklearn.preprocessing import PolynomialFeatures
+import matplotlib.pyplot as plt
 
 # -------------------------
 # 1. Problem & Data Setup
 # -------------------------
-dx = 2     # state dimension
-du = 1     # input dimension
-degree = 1 # degree of monomial basis 
-gamma = 0.99
+# Constants
+g = 1.62      # lunar gravity (m/s^2)
+k = 0.01       # fuel burn rate constant
+dt = 0.1      # time step (s)
+N = 250        # number of steps to simulate
+M = 250       # size of offline pool
+degree = 1
+dx = 3     # state dimension (height, velocity, mass)
+du = 1     # input dimension (control force)
+gamma = 0.99  # discount factor
 
-# Sample sizes
-N = 2000      # number of exploration samples
-M = 500       # offline pool size
+np.random.seed(0)  # for reproducibility
+# Dynamics function: compute next state and sample new control
+def lunar_landing_step(x, u, g=1.62, k=0.1, dt=0.1):
+    h, v, m = x
+    if m <= 0:
+        m = 0.01  # Avoid division by zero
 
-A = np.array([[-0.128308,   0.40262567],
- [-1.42454314, -0.51783493]])
-B = np.array([[-0.76709544],
- [-0.50440709]])
+    # State updates (Euler method)
+    h_next = h + v * dt
+    v_next = v + (-g + u / m) * dt
+    m_next = m - k * u * dt
+    m_next = max(m_next, 0)  # Prevent negative mass
 
-np.random.seed(0)
+    x_next = (h_next, v_next, m_next)
 
-# Generate exploration data: x_i, u_i, x_i+, w_i
-x = np.random.uniform(-10.0, 10.0, size=(N, dx))
-u = np.random.uniform(-10.0, 10.0, size=(N, du))
-x_next = x @ A.T + u @ B.T
-w = np.random.uniform(-10.0, 10.0, size=(N, du))
+    # Sample new control w in [0, 1]
+    w = np.random.uniform(0, 1)
+    
+    return x_next, w
 
-# z = [x, u],  z_next = [x_next, w]
-z = np.hstack([x, u])         # shape (N, dx+du)
-z_next = np.hstack([x_next, w])
+# Sampling bounds
+h0, v0, m0 = 10, -10, 0.2  # initial state (height, velocity, mass)      10, -10, 10
+h_bounds = (0, h0)    # height in meters                0, 10
+v_bounds = (-10, 0)    # velocity (descending)          -10, 0
+m_bounds = (0, 0.2)   # mass in kg                0, 10
+
+# Generate N samples
+def generate_samples(N):
+    samples = []
+    for _ in range(N):
+        h = np.random.uniform(*h_bounds)
+        v = np.random.uniform(*v_bounds)
+        m = np.random.uniform(*m_bounds)
+        u = np.random.uniform(0, 1)
+
+        x = (h, v, m)
+        x_next, w = lunar_landing_step(x, u, g, k, dt)
+        row = [*x, u, *x_next, w]
+        samples.append(row)
+
+    return np.array(samples)
+
+samples = generate_samples(N)
+print("samples shape:", samples.shape)  # should be (N, 2*dx + du + du)
+print("First 5 samples:\n", samples[:5])
+
+# Extract x = [h, v, m], u, x_next = [h', v', m'], w from data
+x       = samples[:, :dx]   # h, v, m
+u       = samples[:, dx:(dx+du)]  # u (keep 2D for hstack)
+x_next  = samples[:, (dx+du):(2*dx+du)]  # h', v', m'
+w       = samples[:, (2*dx+du):2*(dx+du)]  # w (keep 2D)
+
+# Concatenate to form z and z_next
+z      = np.hstack([x, u])      # shape (N, 4)
+print("z shape:", z.shape)  # should be (N, 4)
+z_next = np.hstack([x_next, w]) # shape (N, 4)
+print("z_next shape:", z_next.shape)  # should be (N, 4)
 
 # ----------------------------------------------
 # 2. Feature map p(z): all monomials up to ‘degree’
 # ----------------------------------------------
 poly = PolynomialFeatures(degree, include_bias=False)
 
-# Combine z and z_next to fit the PolynomialFeatures
+    # Combine z and z_next to fit the PolynomialFeatures
 Z_all = np.vstack([z, z_next])         # shape (2N, dx+du)
 P_all = poly.fit_transform(Z_all)      # shape (2N, d)
 d = P_all.shape[1]                     # feature dimension
+print("P_all shape:", P_all.shape)  # should be (2N, d)
 
 # Split back into P_z and P_z_next
 P_z = P_all[:N]        # shape (N, d)
 P_z_next = P_all[N:]   # shape (N, d)
 
 # Build P_y for the offline pool y
-y = np.random.uniform(-10.0, 10.0, size=(M, dx + du))
+h_y = np.random.uniform(*h_bounds, size=(M,1))
+v_y = np.random.uniform(*v_bounds, size=(M,1))
+m_y = np.random.uniform(*m_bounds, size=(M,1))
+u_y = np.random.uniform(0.0, 1.0,  size=(M,1))
+# concatenate into y of shape (M, dx+du)
+y = np.hstack([h_y, v_y, m_y, u_y])      # (M,4)
+
+print("y shape:", y.shape)  # should be (M, 4)
+print("First 5 y samples:\n", y[:5])
+
 P_y = poly.transform(y)   # shape (M, d)
 
-
-# =====================================================================
-# 3. Solve LP for λ and μ simultaneously (vectorized implementation)
-#    sum_i λ_i F_i = sum_j μ_j G_j  where F_i = p(z_i)p(z_i)ᵀ − γ p(z_i+)p(z_i+)ᵀ
-# =====================================================================
 
 # Create CVXPY variables
 lambda_var = cp.Variable(N, nonneg=True)  # λ ∈ ℝ^N₊
@@ -163,57 +212,74 @@ for i0 in np.random.choice(N, size=5, replace=False):
 print("New LP status:", prob_lp.status)
 print("Q_learned (feature‐space) matrix:\n", Q_learned_mat)
 
+Q = Q_learned_mat
+# state–action ordering is [h, v, m, u]
+Q_xu = Q[:3, 3]    # shape (3,)
+Q_uu = Q[3, 3]     # scalar
 
-# ---------------------------------------------------
-# 7. Compare learned Q vs true Q (unchanged)
-# ---------------------------------------------------
-Q_cost = np.eye(dx)
-R_cost = np.eye(du)
+# --- 2) Define the arg-min control rule from your Q
+def policy_learned(state):
+    """
+    state: array-like [h, v, m]
+    returns u in [0,1] which minimizes φ(s,u)^T Q φ(s,u),
+    where φ = [h, v, m, u].
+    """
+    h, v, m = state
+    # gradient wrt u: 2 x^T Q_xu + 2 u Q_uu -> set to zero
+    u_star = - (np.dot([h, v, m], Q_xu)) / Q_uu
+    return float(np.clip(u_star, 0.0, 1.0))
 
-# solve discrete‐ARE with discount → scale A,B
-A_disc = np.sqrt(gamma) * A
-B_disc = np.sqrt(gamma) * B
-P_true = solve_discrete_are(A_disc, B_disc, Q_cost, R_cost)
+traj = []
+u_learn = []
 
-# true Q‐function in (x,u)
-def true_q(x_, u_):
-    x_col = x_.reshape(-1, 1)
-    u_col = u_.reshape(-1, 1)
-    cost_now = x_col.T @ Q_cost @ x_col + u_col.T @ R_cost @ u_col
-    x_next = A @ x_col + B @ u_col
-    cost_future = gamma * (x_next.T @ P_true @ x_next)
-    return (cost_now + cost_future).item()
+# initial conditions (must match the ones you used above)
+h, v, m = h0, v0, m0
+traj.append((h, v, m))
 
-# learned Q‐function in feature‐space
-def learned_q(x_, u_):
-    z_raw = np.hstack([x_, u_]).reshape(1, -1)    # shape (1, dx+du)
-    z_feat = poly.transform(z_raw)                # shape (1, d)
-    return (z_feat @ Q_learned_mat @ z_feat.T).item()
+for i in range(int(10 / dt)):   # max 10 s, will break on touchdown
+    u_t = policy_learned((h, v, m))
+    u_learn.append(u_t)
+    # discrete dynamics
+    h = h + v * dt
+    v = v + (-g + u_t / m) * dt
+    m = max(m - k * u_t * dt, 0)
+    traj.append((h, v, m))
+    if h <= 0:
+        break
 
-# Test on 100 random points
-x_test = np.random.uniform(-10.0, 10.0, size=(100, dx))
-u_test = np.random.uniform(-10.0, 10.0, size=(100, du))
+u_learn = np.array(u_learn)
+t = np.arange(len(u_learn)) * dt
 
-# Also print the “true Q matrix” in the original x‐u space for reference
-L_aug  = np.eye(dx + du)
-AB_cat = np.concatenate((A, B), axis=1)      # shape (2, 3)
-Q_true_mat = L_aug + gamma * AB_cat.T @ P_true @ AB_cat
-print("true Q matrix (x,u) form:\n", Q_true_mat)
+# --- 4) Build a pure bang–bang trajectory by switching where your policy first exceeds 0.5
+u_bang = np.zeros_like(u_learn)
+switch_pts = np.where(u_learn > 0.5)[0]
+if switch_pts.size > 0:
+    s = switch_pts[0]
+    u_bang[s:] = 1.0
+    t_switch = s * dt
+else:
+    t_switch = None
 
-# Compute the difference between the true Q matrix and the learned Q matrix
-Q_diff = Q_true_mat - Q_learned_mat
+# --- 5) Plot both controls
+plt.figure(figsize=(8,3))
+plt.step(t, u_learn, where='post', label='Learned policy')
+plt.step(t, u_bang, where='post', linestyle='--', label='Ideal bang–bang')
+if t_switch is not None:
+    plt.axvline(t_switch, color='gray', linestyle=':', label=f'switch @ {t_switch:.2f}s')
+plt.xlabel('Time (s)')
+plt.ylabel('u (thrust fraction)')
+plt.title('Learned vs. Bang–Bang Control')
+plt.legend()
+plt.tight_layout()
+plt.savefig("lunar_landing_control.png")
 
-# Frobenius norm of the difference
-frobenius_norm = np.linalg.norm(Q_diff, "fro")
-print(f"Frobenius norm of the difference between true Q and learned Q: {frobenius_norm:.2e}")
+# --- 6) Quick saturation check
+frac_zero = np.mean(u_learn < 1e-3)
+frac_one  = np.mean(u_learn > 1-1e-3)
+print(f"Learned policy saturates to 0 on {frac_zero:.1%} of steps, to 1 on {frac_one:.1%} of steps.")
 
-# Trace of the difference
-trace_diff = np.trace(Q_diff)
-print(f"Trace of the difference between true Q and learned Q: {trace_diff:.2e}")
 
-true_vals    = np.array([true_q(x_test[i], u_test[i])     for i in range(100)])
-learned_vals = np.array([learned_q(x_test[i], u_test[i]) for i in range(100)])
-mse = np.mean((true_vals - learned_vals) ** 2)
-print(f"Mean Squared Error between true Q and learned Q: {mse:.2e}")
 
-# Use trace of the difference of the matrices
+# Very high dependence on the number of samples N and M
+# increasing the degree leads to infeasible LPs
+# Very high dependence on the choice of the initial conditions and bounds over the state and control
