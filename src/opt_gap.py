@@ -101,82 +101,6 @@ def learn_Q(A, B, N=500, M=200, degree=1, gamma=0.99):
 
     return Q_learned_mat, poly, C_num
 
-
-def compute_optimality_gap(A, B, Q_learned_mat, poly,
-                           x_lo=-10, x_hi=10, u_lo=-10, u_hi=10, N_test=20000,
-                           degree=1, gamma=0.99):
-    """
-    Given:
-      - A, B        (system matrices, for true-Q computation),
-      - Q_learned_mat ∈ ℝ^{d×d}  (feature-space Q from 'learn_Q'),
-      - poly        (PolynomialFeatures object fitted on degree=1),
-    return the deterministic optimality gap:
-      E_{(x,u)∼Uniform}[ Q_learned(x,u) ] − E_{(x,u)∼Uniform}[ Q_true(x,u) ].
-
-    Uniform sampling is over [x_lo, x_hi]^dx × [u_lo,u_hi]^du.
-    """
-    dx = A.shape[0]
-    du = B.shape[1]
-
-    # Precompute true‐Q ARE solution P_true
-    Q_cost = np.eye(dx)
-    R_cost = np.eye(du)
-    A_disc = np.sqrt(gamma) * A
-    B_disc = np.sqrt(gamma) * B
-    P_true = solve_discrete_are(A_disc, B_disc, Q_cost, R_cost)
-
-    # 2) Analytic case: linear features + symmetric uniform bounds
-    if degree == 1 and x_lo == -x_hi and u_lo == -u_hi:
-        print("Using analytic optimality gap computation...")
-        # compute feature-space true-Q matrix
-        Q11 = Q_cost + gamma * A.T @ P_true @ A
-        Q12 = gamma * A.T @ P_true @ B
-        Q21 = gamma * B.T @ P_true @ A
-        Q22 = R_cost + gamma * B.T @ P_true @ B
-        Q_true_mat = np.block([[Q11, Q12], [Q21, Q22]])
-
-        # variance for each coordinate: Var = (b - a)^2 / 12 = (2a)^2/12 = a^2/3
-        a = x_hi  # since x_hi == -x_lo == u_hi == -u_lo
-        var = a**2 / 3.0
-
-        # compute difference and use trace
-        deltaQ = Q_learned_mat - Q_true_mat
-        gap = abs(var * np.trace(deltaQ))
-        return gap
-
-    # 3) Fallback Monte Carlo sampling
-    # Define true_Q(x,u) and learned_Q(x,u):
-    def true_q(x_, u_):
-        x_col = x_.reshape(-1, 1)
-        u_col = u_.reshape(-1, 1)
-        cost_now = x_col.T @ Q_cost @ x_col + u_col.T @ R_cost @ u_col
-        x_n = A @ x_col + B @ u_col
-        cost_future = gamma * (x_n.T @ P_true @ x_n)
-        return (cost_now + cost_future).item()
-
-    def learned_q(x_, u_):
-        z_raw = np.hstack([x_, u_]).reshape(1, -1)  # shape (1, dx+du)
-        z_feat = poly.transform(z_raw)              # shape (1, d)
-        # produces a 1×1 array; .item() extracts scalar
-        return (z_feat @ Q_learned_mat @ z_feat.T).item()
-
-    # Monte Carlo sampling
-    x_samples = np.random.uniform(x_lo, x_hi, size=(N_test, dx))
-    u_samples = np.random.uniform(u_lo, u_hi, size=(N_test, du))
-
-    true_vals = np.zeros(N_test)
-    learned_vals = np.zeros(N_test)
-
-    for i in range(N_test):
-        true_vals[i]    = true_q(x_samples[i], u_samples[i])
-        learned_vals[i] = learned_q(x_samples[i], u_samples[i])
-
-    E_true    = np.mean(true_vals)
-    E_learned = np.mean(learned_vals)
-
-    gap = np.abs(E_learned - E_true)
-    return gap
-
 def compute_Q_diff_matrix(A, B, Q_learned_mat, poly,
                            x_lo=-1, x_hi=1, u_lo=-1, u_hi=1,
                            degree=1, gamma=0.99):
@@ -219,7 +143,7 @@ dimensions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # you can extend beyond 5 if desir
 gaps = []
 
 for dx in dimensions:
-    # 1) Generate a random stable A (dx×dx) and random B (dx×1)
+    # Generate a random stable A (dx×dx) and random B (dx×1)
     R = np.random.randn(dx, dx)
     eigs = eigvals(R)
     scale = 0.8 / max(abs(eigs))       # force spectral radius < 1
@@ -227,10 +151,10 @@ for dx in dimensions:
     B_rand = np.random.uniform(-1, 1, size=(dx, 1))
     # N = int(50 * (dx)**2)
     # M = int(20 * (dx)**2)
-    N = 2000
-    M = 1000
+    N = 2000        # fixed over dimensions
+    M = 1000        # fixed over dimensions
 
-    # 2) Learn feature-space Q by solving the two LPs
+    # Learn feature-space Q by solving the two LPs
     Q_learned_mat, poly, C_num = learn_Q(A_rand, B_rand,
                                   N=N, M=M,
                                   degree=1, gamma=0.99)
@@ -240,13 +164,7 @@ for dx in dimensions:
         print(f"Dimension {dx}: LP failed → gap = NaN")
         continue
 
-    # 3) Compute the deterministic optimality gap
-    # gap = compute_optimality_gap(A_rand, B_rand,
-    #                              Q_learned_mat, poly,
-    #                              x_lo=-1, x_hi=1,
-    #                              u_lo=-1, u_hi=1,
-    #                              N_test=20000,
-    #                              degree=1, gamma=0.99)
+    # Compute the optimality gap as the trace of the difference matrix
     Q_diff = compute_Q_diff_matrix(A_rand, B_rand, Q_learned_mat, poly,
                                     x_lo=-1, x_hi=1, u_lo=-1, u_hi=1,
                                     degree=1, gamma=0.99)
