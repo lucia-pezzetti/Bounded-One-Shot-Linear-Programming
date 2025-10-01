@@ -4,6 +4,7 @@ import cvxpy as cp
 from sklearn.preprocessing import PolynomialFeatures
 import matplotlib.pyplot as plt
 
+from lunar_landing_utils import lunar_landing_step, is_feasible_state, generate_samples, generate_feasible_samples, generate_samples_nonuniform, stage_cost_with_barrier, stage_cost_with_hard_penalty
 from episode_sampling import sample_episodes, random_policy, stage_cost_hard, rollouts_to_dataset, episodes_to_rows
 
 # -------------------------
@@ -13,144 +14,48 @@ from episode_sampling import sample_episodes, random_policy, stage_cost_hard, ro
 g = 1.62      # lunar gravity (m/s^2)
 k = 0.1       # fuel burn rate constant
 dt = 0.1      # time step (s)
-N = 1000        # number of steps to simulate
-M = 500       # size of offline pool
-degree = 2
-dx = 3     # state dimension (height, velocity, mass)
-du = 1     # input dimension (control force)
-gamma = 0.99  # discount factor
+N = 10000      # number of samples to simulate
+M = 1000       # size of offline pool
+degree = 2    # polynomial degree for features
+dx = 3        # state dimension (height, velocity, mass)
+du = 1        # input dimension (control force)
+from config import GAMMA
+gamma = GAMMA  # discount factor
 
-np.random.seed(0)  # for reproducibility
-
-# Dynamics function: compute next state and sample new control
-def lunar_landing_step(x, u, g=1.62, k=0.1, dt=0.1):
-    h, v, m = x
-    if m <= 0:
-        m = 0.01  # Avoid division by zero
-
-    # State updates (Euler method)
-    h_next = h + v * dt
-    v_next = v + (-g + u / m) * dt
-    m_next = m - k * u * dt
-    m_next = max(m_next, 0)  # Prevent negative mass
-
-    x_next = (h_next, v_next, m_next)
-
-    # Sample new control w in [0, 1]
-    w = np.random.uniform(0, 1)
-    
-    return x_next, w
+# for reproducibility
+seed = 42
+np.random.seed(seed)
+rng = np.random.default_rng(seed)
 
 # Sampling bounds
-h0, v0, m0, ms = 10, -5, 0.3, 0.1  # initial state (height, velocity, mass)      10, -10, 10
-h_bounds = (-0.2, h0)    # height in meters                0, 10
-v_bounds = (v0, 0.5)    # velocity (descending)          -10, 0
-m_bounds = (ms, m0)   # mass in kg                0, 10
-
-def is_feasible_state(h, v, m, ms, g, k):
-    """
-    Check if a state (h,v,m) can achieve soft landing.
-    Uses the glide slope constraint: v >= -c*sqrt(h) where c = sqrt(2*a_max)
-    """
-    if h <= 0:
-        return abs(v) <= 0.1  # Near zero velocity at ground
-    
-    # Maximum deceleration with full thrust
-    a_max = max(0, 1.0/ms - g)  # net upward acceleration at minimum mass
-    if a_max <= 0:
-        return False  # Cannot decelerate at all
-    
-    c = np.sqrt(2 * a_max)
-    glide_slope_velocity = -c * np.sqrt(h)
-    
-    return v >= glide_slope_velocity
+h0, v0, m0, ms = 10, -1, 0.3, 0.1  # initial state (height, velocity, mass)
+h_bounds = (0.0, h0)    # height in meters (fixed: no negative heights)
+v_bounds = (-4, 0.5)    # velocity (descending)
+m_bounds = (ms, m0)   # mass in kg
 
 rng = np.random.default_rng(0)
 def pi_rand(x):
     return random_policy(x, u_min=0.0, u_max=1.0, rng=rng)
 
+# Use feasible sample generation for better constraint satisfaction
+samples = generate_feasible_samples(N, h_bounds, v_bounds, m_bounds, ms, g, k, dt, max_attempts=50000)
 
-# Generate N samples
-def generate_samples(N):
-    samples = []
-    for _ in range(N):
-        h = np.random.uniform(*h_bounds)
-        v = np.random.uniform(*v_bounds)
-        m = np.random.uniform(*m_bounds)
-        u = np.random.uniform(0, 1)
-
-        x = (h, v, m)
-        x_next, w = lunar_landing_step(x, u, g, k, dt)
-        row = [*x, u, *x_next, w]
-        samples.append(row)
-
-    return np.array(samples)
-
-# samples = generate_samples(N)
-
-
-# --- Non-uniform sampling focused near origin ---------------------------------
-def generate_samples_nonuniform(N, sigma_h=2.0, sigma_v=1.0, max_tries_per_sample=2000, rng=None):
-    """
-    Generate N samples (x, u, x_next, w) like `generate_samples`, but bias sampling
-    toward states near the origin in (h, v) using rejection sampling.
-    
-    Acceptance probability:
-        a(h, v) = exp( -0.5 * ((h/sigma_h)**2 + (v/sigma_v)**2) )
-    which is highest at (0,0) and smoothly decays away from it.
-    
-    Args:
-        N: number of accepted samples desired.
-        sigma_h: spread for altitude concentration (meters). Smaller -> more mass near h=0.
-        sigma_v: spread for velocity concentration (m/s).   Smaller -> more mass near v=0.
-        max_tries_per_sample: cap per accepted sample to avoid infinite loops in extreme settings.
-        rng: optional numpy Generator.
-        
-    Returns:
-        np.ndarray of shape (N, 8): [h, v, m, u, h_next, v_next, m_next, w]
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-    
-    samples = []
-    tries = 0
-    max_total_tries = int(max_tries_per_sample * N)
-    
-    # Precompute bounds for speed
-    h_lo, h_hi = h_bounds
-    v_lo, v_hi = v_bounds
-    m_lo, m_hi = m_bounds
-    
-    while len(samples) < N and tries < max_total_tries:
-        # Propose uniformly within bounds
-        h = rng.uniform(h_lo, h_hi)
-        v = rng.uniform(v_lo, v_hi)
-        m = rng.uniform(m_lo, m_hi)
-        u = rng.uniform(0.0, 1.0)
-        
-        # Rejection probability that favors (h, v) near (0,0)
-        a = np.exp(-0.5 * ((h / sigma_h)**2 + (v / sigma_v)**2))
-        
-        # Draw a uniform[0,1] and accept if below a
-        if rng.uniform() <= a:
-            x = (h, v, m)
-            x_next, w = lunar_landing_step(x, u, g, k, dt)
-            samples.append([*x, u, *x_next, w])
-        tries += 1
-    
-    if len(samples) < N:
-        print(f"[WARN] Only accepted {len(samples)} / {N} after {tries} proposals. "
-              f"Try increasing max_tries_per_sample or the sigmas.")
-    else:
-        print(f"[INFO] Acceptance ratio: {len(samples)}/{tries} = {len(samples)/max(tries,1):.3f}")
-    
-    return np.array(samples)
-
-samples = generate_samples_nonuniform(
-    N,
-    sigma_h=1.0,   # tighten/loosen focus on altitude
-    sigma_v=1.0    # tighten/loosen focus on velocity
-)
+# Fallback to non-uniform if not enough feasible samples
+if len(samples) < N * 0.8:  # If less than 80% feasible
+    print("Using non-uniform sampling as fallback...")
+    samples = generate_samples_nonuniform(
+        N,
+        h_bounds,
+        v_bounds,
+        m_bounds,
+        g,
+        k,
+        dt,
+        sigma_h=0.5,   # tighten/loosen focus on altitude
+        sigma_v=2.0,   # tighten/loosen focus on velocity
+        max_tries_per_sample=2000,
+        rng=rng
+    )
 
 
 # stack all xs and us into a single array
@@ -208,7 +113,7 @@ Pz_next_const  = cp.Constant(P_z_next)   # shape (N, d)
 Py_const       = cp.Constant(P_y)        # shape (M, d)
 
 # Build the moment-match matrix in one shot:
-#    sum_i λ_i [P_z[i] P_z[i]ᵀ] = P_zᵀ · diag(λ) · P_z
+# sum_i λ_i [P_z[i] P_z[i]ᵀ] = P_zᵀ · diag(λ) · P_z
 sum_PzPzT = Pz_const.T @ cp.diag(lambda_var) @ Pz_const            # shape (d, d)
 sum_PznPznT = Pz_next_const.T @ cp.diag(lambda_var) @ Pz_next_const  # shape (d, d)
 sum_PyPyT = Py_const.T @ cp.diag(mu_var) @ Py_const                 # shape (d, d)
@@ -244,6 +149,7 @@ if prob.status in ["optimal", "optimal_inaccurate"]:
     print("Nonzero μ count:", np.sum(mu_vals > 1e-6))
 else:
     print("No valid solution; status", prob.status)
+    exit(1)
 
 # Extract the final λ, μ
 lam = lambda_var.value            # shape (N,)
@@ -265,7 +171,6 @@ C_val = P_y.T @ np.diag(mu) @ P_y           # shape (d, d)
 c_vec = C_val.flatten(order="C")          # shape (d²,)
 
 # Define Q_var ∈ ℝ^{d×d}, PSD, and its vectorized form
-# REMOVE THE CONSTRAINT PSD=True, HOWEVER PAY ATTENTION WHEN NOT LQR
 Q_var     = cp.Variable((d, d))               # matrix variable
 Q_var_vec = cp.reshape(Q_var, (d * d,), order="C")     # flatten in row-major
 
@@ -274,8 +179,8 @@ Q_var_vec = cp.reshape(Q_var, (d * d,), order="C")     # flatten in row-major
 # add safety barrier to impose soft landing
 L_xu = 10.0*u.squeeze() # shape (N,)
 # barrier hyper-parameters (tune as needed)
-k_b = 100.0     # overall barrier strength
-c_b = 10.0    # how rapidly the penalty ramps up as h→0
+k_b = 50.0     # overall barrier strength
+c_b = 75.0    # how rapidly the penalty ramps up as h→0
 h_vals = x[:, 0].squeeze()   # heights
 v_vals = x[:, 1].squeeze()   # vertical velocities
 # barrier term: \to \infty if v≠0 at h=0
@@ -284,82 +189,9 @@ barrier = k_b * np.exp(-c_b * h_vals) * (v_vals**2)
 # add to your cost vector
 L_xu = L_xu + barrier
 
-# cost computation with barrier to impose soft landing
-# Cost function with barrier
-def stage_cost_with_barrier(h, v, m, u, *, lam_fuel=0.05, beta_barrier=1000.0, ms_min=None, g=1.62):
-    """
-    Stage cost with barrier function to enforce feasibility
-    """
-    h = np.asarray(h, dtype=float)
-    v = np.asarray(v, dtype=float)
-    u = np.asarray(u, dtype=float)
-    
-    # Fuel cost
-    fuel_cost = lam_fuel * np.abs(u)
-    
-    # Barrier for feasibility
-    if ms_min is None:
-        ms_min = ms
-    
-    a_max = max(0.0, 1.0 / ms_min - g)
-    c = np.sqrt(2.0 * max(a_max, 1e-12))
-    
-    # Glide slope constraint: v >= -c*sqrt(h)
-    h_pos = np.maximum(h, 1e-6)  # Avoid sqrt(0)
-    glide_slope_bound = -c * np.sqrt(h_pos)
-    
-    # Barrier: penalize when v < glide_slope_bound
-    violation = glide_slope_bound - v  # positive when violating
-    barrier = beta_barrier * np.maximum(0.0, violation)**2
-    
-    # Terminal barrier: heavily penalize high velocity near ground
-    ground_penalty = np.where(h < 0.5, 1000.0 * v**2, 0.0)
-    
-    total_cost = fuel_cost + barrier + ground_penalty
-    return np.nan_to_num(total_cost, nan=1e12, posinf=1e12, neginf=1e12)
-
-def stage_cost_with_hard_penalty(h, v, m, u, *, lam_fuel=0.05, v_tol=0.2,
-                                 ms_min=None, g=1.62, big_M=10, w_h=0.2):
-    """
-    Returns lam_fuel*|u| normally, but returns `big_M` whenever any is violated:
-      1) Glide slope: v >= -sqrt(2*max(1/ms_min - g, 0))*sqrt(max(h, 0))
-      2) Touchdown: if h <= 0, require |v| <= v_tol
-      3) Physical sanity: h >= 0 and m >= ms_min
-    """
-    h = np.asarray(h, dtype=float)
-    v = np.asarray(v, dtype=float)
-    u = np.asarray(u, dtype=float)
-
-    if ms_min is None:
-        ms_min = ms
-
-    # Base cost: lam_fuel * |u|
-    base = lam_fuel * np.abs(u)
-
-    # just using a fuel constraint is not enough. Touching the ground is extremely risky, the agent learns to avoid it.
-    # Add a small altitude shaping cost to encourage descending
-    base += w_h * h
-
-    a_max = max(0.0, 1.0 / ms_min - g)
-    c = np.sqrt(2.0 * max(a_max, 1e-12))
-
-    h_pos = np.maximum(h, 0.0)
-    glide_ok  = v >= (-c * np.sqrt(h_pos))
-    ground_ok = np.where(h <= 1e-6, np.abs(v) <= v_tol, True)
-    phys_ok   = (h >= 0.0) & (m >= ms_min)
-
-    mask_safe_land = (h <= 1e-6) & (np.abs(v) <= v_tol)
-    base = np.where(mask_safe_land, base - big_M, base)
-
-    ok = glide_ok & ground_ok & phys_ok
-    return np.where(ok, base, base + big_M)
-
-# Compute costs using the new barrier function
-# L_xu = stage_cost_with_barrier(x[:, 0].squeeze(), x[:, 1].squeeze(), x[:, 2].squeeze(), u.squeeze(), ms_min=ms, g=g)
-
-# L_xu += terminal_cost_soft(x[:, 0].squeeze(), x[:, 1].squeeze(), Wh=0.5, Wv=1e5, vtol=0.7)
-
-# L_xu = stage_cost_with_hard_penalty(x[:, 0].squeeze(), x[:, 1].squeeze(), x[:, 2].squeeze(), u.squeeze(), lam_fuel=1e6, ms_min=ms)
+# Compute costs using the enhanced barrier function
+L_xu = stage_cost_with_barrier(x[:, 0].squeeze(), x[:, 1].squeeze(), x[:, 2].squeeze(), ms, u.squeeze(), 
+                               lam_fuel=0.5, beta_barrier=1000.0, ms_min=ms, g=g)
 
 # Build a 3D array of shape (N, d, d) in one go, then flatten:
 F_3D = (P_z[:, :, None] * P_z[:, None, :]) - gamma * (P_z_next[:, :, None] * P_z_next[:, None, :])
@@ -367,15 +199,30 @@ F_3D = (P_z[:, :, None] * P_z[:, None, :]) - gamma * (P_z_next[:, :, None] * P_z
 F_mat = F_3D.reshape((N, d * d), order="C")     # shape (N, d²)
 
 # single vectorized constraint:
-constraints_lp = [ F_mat @ Q_var_vec <= L_xu ]
-# Add safety constraints for samples near the ground
+constraints_lp = [ F_mat @ Q_var_vec >= L_xu ]
+
+# Add additional safety constraints for critical states
 for i in range(N):
-    h_i, v_i = x[i, 0], x[i, 1]
-    if h_i < 1.0:  # Near ground
-        # Penalize high velocity near ground more heavily
-        safety_penalty = 1000.0 * v_i**2
-        # You could add this as an additional constraint or modify L_xu
+    h_i, v_i, m_i = x[i, 0], x[i, 1], x[i, 2]
+    
+    # Near ground: heavily penalize high velocity
+    if h_i < 1.0:
+        safety_penalty = 5000.0 * v_i**2
         L_xu[i] += safety_penalty
+    
+    # Very low altitude: extremely high penalty for any velocity
+    if h_i < 0.1:
+        L_xu[i] += 10000.0 * v_i**2
+    
+    # Check glide slope violation and add penalty
+    if h_i > 0:
+        a_max = max(0.0, 1.0/m_i - g)
+        if a_max > 0:
+            c = np.sqrt(2.0 * a_max)
+            glide_bound = -c * np.sqrt(h_i)
+            if v_i < glide_bound:
+                violation_penalty = 5000.0 * (glide_bound - v_i)**2
+                L_xu[i] += violation_penalty
 
 # Objective: maximize c_vecᵀ · Q_var_vec
 objective_lp = cp.Maximize(c_vec @ Q_var_vec)
@@ -386,10 +233,20 @@ try:
     # PAY ATTENTION: how the solver treats matrix symmetry
     prob_lp.solve(solver=cp.MOSEK, mosek_params={})
     print("Status (LP for Q):", prob_lp.status)
+    
+    if prob_lp.status not in ["optimal", "optimal_inaccurate"]:
+        print(f"❌ LP #2 failed with status: {prob_lp.status}")
+        exit(1)
+        
 except Exception as e:
-    print("Solver failed with error:", e)
+    print(f"❌ LP #2 solver failed with error: {e}")
+    exit(1)
 
 Q_learned_vec = Q_var_vec.value    # shape (d²,)
+if Q_learned_vec is None:
+    print("❌ Q_learned_vec is None - solver failed")
+    exit(1)
+    
 Q_learned_mat = Q_learned_vec.reshape((d, d), order="C")  # shape (d, d)
 
 # Quick feasibility check on a few random i:
@@ -404,21 +261,63 @@ print("Q_learned (feature‐space) matrix:\n", Q_learned_mat)
 print("eigenvalues of Q_learned:", np.linalg.eigvalsh(Q_learned_mat))
 
 Q = Q_learned_mat
+print("Q shape:", Q.shape)  # should be (4, 4)
 # state–action ordering is [h, v, m, u]
-Q_xu = Q[:3, 3]    # shape (3,)
-Q_uu = Q[3, 3]     # scalar
+# Q_xu = Q[:3, 3]    # shape (3,)
+# Q_uu = Q[3, 3]     # scalar
 
 # --- 2) Define the arg-min control rule from your Q
 def policy_learned(state):
     """
     state: array-like [h, v, m]
     returns u in [0,1] which minimizes φ(s,u)^T Q φ(s,u),
-    where φ = [h, v, m, u].
+    where φ includes all polynomial features up to degree 2.
+    
+    For degree-2 features: φ = [h, v, m, u, h², hv, hm, hu, v², vm, vu, m², mu, u²]
     """
     h, v, m = state
     # gradient wrt u: 2 x^T Q_xu + 2 u Q_uu -> set to zero
-    u_star = - (np.dot([h, v, m], Q_xu)) / Q_uu
+    # u_star = - (np.dot([h, v, m], Q_xu)) / Q_uu
+    # return float(np.clip(u_star, 0.0, 1.0))
+
+    # Method 1: Analytical gradient approach
+    # The gradient of φ^T Q φ with respect to u is:
+    # ∂/∂u [φ^T Q φ] = 2 * (∂φ/∂u)^T Q φ
+    
+    # For our polynomial features, ∂φ/∂u = [0, 0, 0, 1, 0, 0, 0, h, 0, 0, v, 0, m, 2u]
+    # This gives us a quadratic equation in u that we can solve analytically
+    
+    # Extract the relevant parts of Q for the gradient computation
+    # Q_uu = Q[3, 3] (u*u term)
+    # Q_hu = Q[0, 3] (h*u term) 
+    # Q_vu = Q[1, 3] (v*u term)
+    # Q_mu = Q[2, 3] (m*u term)
+    # Q_hu2 = Q[7, 3] (h*u term from hu feature)
+    # Q_vu2 = Q[10, 3] (v*u term from vu feature) 
+    # Q_mu2 = Q[12, 3] (m*u term from mu feature)
+    # Q_u2u = Q[13, 3] (u²*u term)
+    
+    Q_uu = Q[3, 3] + Q[13, 13]  # coefficient of u² term
+    Q_hu = Q[0, 3] + Q[7, 7]    # coefficient of h*u term  
+    Q_vu = Q[1, 3] + Q[10, 10]  # coefficient of v*u term
+    Q_mu = Q[2, 3] + Q[12, 12]  # coefficient of m*u term
+    
+    # Also need cross-terms
+    Q_hu += Q[0, 7] + Q[7, 0]   # h*u cross-terms
+    Q_vu += Q[1, 10] + Q[10, 1] # v*u cross-terms  
+    Q_mu += Q[2, 12] + Q[12, 2] # m*u cross-terms
+    
+    # Solve the quadratic equation: Q_uu * u² + (Q_hu*h + Q_vu*v + Q_mu*m) * u + const = 0
+    # Taking derivative and setting to zero: 2*Q_uu*u + (Q_hu*h + Q_vu*v + Q_mu*m) = 0
+    # Therefore: u* = -(Q_hu*h + Q_vu*v + Q_mu*m) / (2*Q_uu)
+    
+    if abs(Q_uu) < 1e-8:
+        u_star = 0.5  # fallback if Q_uu is too small
+    else:
+        u_star = -(Q_hu*h + Q_vu*v + Q_mu*m) / (2*Q_uu)
+    
     return float(np.clip(u_star, 0.0, 1.0))
+    
 
 def policy_learned_with_safety(state):
     """
@@ -427,27 +326,34 @@ def policy_learned_with_safety(state):
     h, v, m = state
     
     # Basic quadratic policy
-    Q_xu = Q_learned_mat[:3, 3]
-    Q_uu = Q_learned_mat[3, 3]
+    # Q_xu = Q_learned_mat[:3, 3]
+    # Q_uu = Q_learned_mat[3, 3]
     
-    if abs(Q_uu) < 1e-8:
-        u_star = 0.5  # fallback
-    else:
-        u_star = -np.dot([h, v, m], Q_xu) / Q_uu
-        u_star = float(np.clip(u_star, 0.0, 1.0))
+    # if abs(Q_uu) < 1e-8:
+    #     u_star = 0.5  # fallback
+    # else:
+    #     u_star = -np.dot([h, v, m], Q_xu) / Q_uu
+    #     u_star = float(np.clip(u_star, 0.0, 1.0))
+
+    u_star = policy_learned(state)
     
     # Safety override: if approaching feasibility boundary, use maximum thrust
     if h > 0:
         a_max = max(0.0, 1.0/m - g)  # current maximum deceleration
-        c = np.sqrt(2.0 * max(a_max, 1e-12))
-        glide_slope_velocity = -c * np.sqrt(h)
-        
-        # If close to violating constraint, override with high thrust
-        # safety_margin = 0.1
-        # if v < glide_slope_velocity + safety_margin:
-        #     u_star = 1.0
+        if a_max > 0:
+            c = np.sqrt(2.0 * a_max)
+            glide_slope_velocity = -c * np.sqrt(h)
+            
+            # If close to violating constraint, override with high thrust
+            safety_margin = 0.1
+            if v < glide_slope_velocity + safety_margin:
+                u_star = 1.0
     
-    return u_star
+    # Emergency override: if very close to ground with high velocity
+    if h < 0.5 and abs(v) > 0.5:
+        u_star = 1.0
+    
+    return float(np.clip(u_star, 0.0, 1.0))
 
 traj = []
 u_learn = []
@@ -463,12 +369,26 @@ for i in range(int(20 / dt)):   # max 10 s, will break on touchdown
     u_t = policy_learned_with_safety((h, v, m))
     print(f"Control u_t = {u_t:.2f}")
     u_learn.append(u_t)
+    
+    # Check feasibility before applying control
+    if not is_feasible_state(h, v, m, ms, g, k):
+        print(f"Warning: State ({h:.2f}, {v:.2f}, {m:.2f}) is not feasible!")
+        # Emergency thrust if not feasible
+        u_t = 1.0
+    
     # discrete dynamics
     h = h + v * dt
     v = v + (-g + u_t / m) * dt
     m = max(m - k * u_t * dt, ms)
     traj.append((h, v, m))
+    
+    # Check for landing
     if h <= 0:
+        print(f"Landed at step {i} with velocity {v:.3f} m/s")
+        if abs(v) <= 0.1:
+            print("Soft landing achieved!")
+        else:
+            print("Hard landing - constraint violated!")
         break
 
 u_learn = np.array(u_learn)
@@ -598,7 +518,7 @@ plt.ylabel('u (thrust fraction)')
 plt.title('Learned vs. Bang–Bang Control')
 plt.legend()
 plt.tight_layout()
-plt.savefig("../figures/lunar_landing_control.pdf")
+plt.savefig("../figures/lunar_landing_control2.pdf")
 
 # --- 6) Quick saturation check
 frac_zero = np.mean(u_learn < 1e-3)

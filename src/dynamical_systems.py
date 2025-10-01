@@ -90,8 +90,10 @@ class dlqr:
         Returns:
           cost : array, shape (batch,)  the cost per sample
         """
-        L_x = 10 * np.sum(X[:, :2]**2, axis=1) + 0.5 * np.sum(X[:, 2:4]**2, axis=1)
-        L_u = 0.001 * np.sum(U**2, axis=1)
+        # State cost: x^T Q x
+        L_x = np.sum(X @ self.Q * X, axis=1)
+        # Control cost: u^T R u  
+        L_u = np.sum(U @ self.R * U, axis=1)
         return L_x + L_u
 
     def optimal_solution(self):
@@ -147,7 +149,7 @@ class dlqr:
 
 
 class cart_pole:
-    def __init__(self, m_c, m_p, l, delta_t, gamma, N, M):
+    def __init__(self, m_c, m_p, l, delta_t, C, rho, gamma, N, M):
         self.N_u = 1
         self.N_x = 4
         
@@ -169,6 +171,12 @@ class cart_pole:
         self.lqr_k_cart: float = 2.0
         self.lqr_k_theta: float = 30.0
         self.exploration_std = 5.0  # for policy exploration
+
+        self.C = C
+        self.rho = rho
+
+        self.Q = C.T @ C
+        self.R = rho * np.eye(self.N_u)
 
     def linearized_system(self):
         """Linearized cart-pole dynamics around upright equilibrium"""
@@ -248,36 +256,15 @@ class cart_pole:
 
         return X, U, X_plus, U_plus
 
-    def simple_stabilizing_policy(self, x: np.ndarray, u_bounds) -> float:
-        u = -self.lqr_k_cart * x[:,0] - self.lqr_k_theta * x[:,2]
-        return np.asarray(np.clip(u, u_bounds[0], u_bounds[1])).reshape(-1, 1)
-
-    def collect_policy_data(self, x_bounds, x_dot_bounds, theta_bounds, theta_dot_bounds, u_bounds, horizon_collect, num_rollouts_eval: int = 20):
-        X, U, Xn, L = [], [], [], []
-        for _ in range(num_rollouts_eval):
-            x = np.column_stack([
-                np.random.uniform(*x_bounds, size=1),
-                np.random.uniform(*x_dot_bounds, size=1),
-                np.random.uniform(*theta_bounds, size=1),
-                np.random.uniform(*theta_dot_bounds, size=1)
-            ])
-            for _ in range(horizon_collect):
-                u_mean = self.simple_stabilizing_policy(x, u_bounds)
-                print(f'u shape: {u_mean.shape}, x shape: {x.shape}')
-                u = u_mean + np.random.normal(0.0, self.exploration_std)
-                u = np.clip(u, u_bounds[0], u_bounds[1])
-                c = self.cost(x, u)
-                x_next = np.array([self.step(xi, ui[0]) for xi, ui in zip(x, u)])
-                X.append(x.copy()); U.append(u); Xn.append(x_next.copy()); L.append(c)
-                x = x_next
-        return np.array(X), np.array(U).reshape(-1,1), np.array(Xn), np.array(L).reshape(-1,1)
-
     def cost(self, X, U):
-        """Compute quadratic cost: L = diag(1, 1, 100, 10, 0.001)"""
-        L_x = 1 * (X[:, 0]**2 + X[:, 1]**2) + 100 * (X[:, 2]**2 + 10 * X[:, 3]**2)
+        """Compute quadratic cost using Q and R matrices: L = x^T Q x + u^T R u"""
+        # State cost: x^T Q x
+        L_x = np.sum(X @ self.Q * X, axis=1)
+        
+        # Control cost: u^T R u
         if U.ndim == 1:
-            L_u = 0.001 * U**2
+            L_u = U @ self.R * U
         else:
-            L_u = 0.001 * U.flatten()**2
+            L_u = np.sum(U @ self.R * U, axis=1)
         
         return L_x + L_u
