@@ -10,7 +10,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from sklearn.preprocessing import PolynomialFeatures
-from utils import ScaleOnlyScaler
+from utils import ScaleOnlyScaler, BlockScaleOnlyScaler
+from feature_scaling import PolynomialFeatureScaler
 from dynamical_systems import cart_pole
 from policy_extraction import PolicyExtractor
 from moment_matching import solve_moment_matching_Q, solve_identity_Q
@@ -46,7 +47,7 @@ degree = DEGREE
 x_bounds = X_BOUNDS
 x_dot_bounds = X_DOT_BOUNDS
 theta_bounds = THETA_BOUNDS
-theta_dot_bounds = THETA_DOT_BOUNDS
+theta_dot_bounds = THETA_DOT_BOUNDS   
 u_bounds = U_BOUNDS
 
 # Grid search parameters for convergence analysis
@@ -61,7 +62,7 @@ class ConvergenceAnalyzer:
     Analyzes convergence regions for different policies
     """
     
-    def __init__(self, system, extractor, mm_policy, lqr_policy):
+    def __init__(self, system, extractor, mm_policy, lqr_policy, convergence_threshold):
         self.system = system
         self.extractor = extractor
         self.mm_policy = mm_policy
@@ -93,8 +94,9 @@ class ConvergenceAnalyzer:
         equilibrium = np.array([0.0, 0.0, 0.0, 0.0])
         
         # Check if all states in the last 100 steps are within threshold
-        distances = np.linalg.norm(last_states - equilibrium, axis=1)
+        distances = np.linalg.norm(last_states - equilibrium, ord=np.inf, axis=1)
         max_distance = np.max(distances)
+        # print(f"Max distance: {max_distance}")
         
         return max_distance < threshold
     
@@ -164,7 +166,7 @@ class ConvergenceAnalyzer:
             last_100_states = np.array(trajectory[-100:])
             
             # Check if all last 100 states are sufficiently close to equilibrium (origin)
-            equilibrium_tolerance = 0.3  # Adjust this threshold as needed
+            equilibrium_tolerance = self.convergence_threshold  # Adjust this threshold as needed
             distances_to_equilibrium = np.linalg.norm(last_100_states, axis=1)
             
             # If any of the last 100 states are too far from equilibrium, mark as unstable
@@ -233,6 +235,8 @@ class ConvergenceAnalyzer:
                 processed += 1
                 if processed % (total_points // 10) == 0:
                     print(f"Progress: {processed}/{total_points} ({100*processed/total_points:.1f}%)")
+                    print(f"MM success progress: {np.mean(mm_success)}")
+                    print(f"LQR success progress: {np.mean(lqr_success)}")
         
         # Compute statistics
         mm_convergence_rate = np.mean(mm_convergence)
@@ -320,26 +324,26 @@ class ConvergenceAnalyzer:
             # Find points in this category
             points_x = []
             points_y = []
-        
-        for i in range(len(theta_flat)):
-            theta_idx = np.argmin(np.abs(theta_vals - theta_flat[i]))
-            theta_dot_idx = np.argmin(np.abs(theta_dot_vals - theta_dot_flat[i]))
             
-            mm_converges = results['mm_convergence'][theta_idx, theta_dot_idx]
-            lqr_converges = results['lqr_convergence'][theta_idx, theta_dot_idx]
-            
-            if cat == 'both' and mm_converges and lqr_converges:
-                points_x.append(theta_flat[i])
-                points_y.append(theta_dot_flat[i])
-            elif cat == 'mm_only' and mm_converges and not lqr_converges:
-                points_x.append(theta_flat[i])
-                points_y.append(theta_dot_flat[i])
-            elif cat == 'lqr_only' and not mm_converges and lqr_converges:
-                points_x.append(theta_flat[i])
-                points_y.append(theta_dot_flat[i])
-            elif cat == 'neither' and not mm_converges and not lqr_converges:
-                points_x.append(theta_flat[i])
-                points_y.append(theta_dot_flat[i])
+            for i in range(len(theta_flat)):
+                theta_idx = np.argmin(np.abs(theta_vals - theta_flat[i]))
+                theta_dot_idx = np.argmin(np.abs(theta_dot_vals - theta_dot_flat[i]))
+                
+                mm_converges = results['mm_convergence'][theta_idx, theta_dot_idx]
+                lqr_converges = results['lqr_convergence'][theta_idx, theta_dot_idx]
+                
+                if cat == 'both' and mm_converges and lqr_converges:
+                    points_x.append(theta_flat[i])
+                    points_y.append(theta_dot_flat[i])
+                elif cat == 'mm_only' and mm_converges and not lqr_converges:
+                    points_x.append(theta_flat[i])
+                    points_y.append(theta_dot_flat[i])
+                elif cat == 'lqr_only' and not mm_converges and lqr_converges:
+                    points_x.append(theta_flat[i])
+                    points_y.append(theta_dot_flat[i])
+                elif cat == 'neither' and not mm_converges and not lqr_converges:
+                    points_x.append(theta_flat[i])
+                    points_y.append(theta_dot_flat[i])
             
             # Plot points for this category
             if points_x:  # Only plot if there are points in this category
@@ -775,11 +779,14 @@ def train_moment_matching_policy(system, N_train, M_offline, degree, regularizat
     # Handle polynomial feature generation based on whether scaling is used
     scaler = None
     if use_scaling:
-        # Create scale-only scaler (no centering, only division by std)
-        scaler = ScaleOnlyScaler()
+        # Create block scale-only scaler (no centering, only division by std)
+        # Scale states and actions separately for better numerical stability
+        dx = x.shape[1]
+        du = u.shape[1]
+        scaler = BlockScaleOnlyScaler(dx=dx, du=du)
         scaler.fit(Z_all)
         Z_all_scaled = scaler.transform(Z_all)
-        L_xu = L_xu / scaler.scale_[-1]  # Scale costs by action scaling factor
+        L_xu = L_xu / scaler.scale_u_[0]  # Scale costs by action scaling factor
         
         # poly was fitted on scaled data, so use scaled data
         poly = PolynomialFeatures(degree=degree, include_bias=False)
@@ -799,14 +806,26 @@ def train_moment_matching_policy(system, N_train, M_offline, degree, regularizat
         )
     else:
         # poly was fitted on unscaled data, so use unscaled data
-        poly = PolynomialFeatures(degree=degree, include_bias=False)
-        P_all = poly.fit_transform(Z_all)
+        # Create a PolynomialFeatureScaler with no scaling for consistency with policy extraction
+        dx = x.shape[1]
+        du = u.shape[1]
+        poly_scaler = PolynomialFeatureScaler(
+            degree=degree,
+            scaling_method='none',
+            dx=dx,
+            du=du
+        )
+        # Fit the scaler (which will fit the internal poly)
+        P_all = poly_scaler.fit_transform(Z_all)
         
         P_z = P_all[:N_train]
         P_z_next = P_all[N_train:]
         
         y = np.concatenate([x_aux, u_aux], axis=1)  # (M, dx+du)
-        P_y = poly.transform(y)
+        P_y = poly_scaler.transform(y)
+        
+        # Store poly for backward compatibility
+        poly = poly_scaler.poly
     
         # Use original features for moment matching
         Q_mm, mu, status_info = solve_moment_matching_Q(
@@ -863,14 +882,39 @@ def train_moment_matching_policy(system, N_train, M_offline, degree, regularizat
     
     if use_scaling and scaler is not None:
         print("Using analytical policy extraction with scaling")
+        # Create a PolynomialFeatureScaler wrapper for the scaler and poly
+        dx = x.shape[1]
+        du = u.shape[1]
+        poly_scaler = PolynomialFeatureScaler(
+            degree=degree,
+            scaling_method='standard',  # This will be ignored since we're using existing scaler
+            dx=dx,
+            du=du
+        )
+        poly_scaler.poly = poly
+        # Map scaler attributes (handle both underscore and non-underscore versions)
+        if hasattr(scaler, 'scaler_x'):
+            poly_scaler.scaler_x = scaler.scaler_x
+        elif hasattr(scaler, 'scaler_x_'):
+            poly_scaler.scaler_x = scaler.scaler_x_
+        else:
+            poly_scaler.scaler_x = None
+        if hasattr(scaler, 'scaler_u'):
+            poly_scaler.scaler_u = scaler.scaler_u
+        elif hasattr(scaler, 'scaler_u_'):
+            poly_scaler.scaler_u = scaler.scaler_u_
+        else:
+            poly_scaler.scaler_u = None
+        poly_scaler.is_fitted_ = True
         mm_policy = extractor.extract_moment_matching_policy_analytical(
-            system, Q_mm, poly, scaler
+            system, Q_mm, poly_scaler
         )
     else:
         print("Using analytical policy extraction without scaling")
-    mm_policy = extractor.extract_moment_matching_policy_analytical(
-        system, Q_mm, poly
-    )
+        # poly_scaler was already created in the else block above
+        mm_policy = extractor.extract_moment_matching_policy_analytical(
+            system, Q_mm, poly_scaler
+        )
     
     return mm_policy, poly, scaler
 
@@ -878,8 +922,8 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze convergence regions of cart pole policies")
     parser.add_argument("--resolution", type=int, default=100, help="Grid resolution (default: 50)")
     parser.add_argument("--horizon", type=int, default=10000, help="Simulation horizon (default: 5000)")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Convergence threshold (default: 0.5)")
-    parser.add_argument("--N_train", type=int, default=10000, help="Training samples (default: 2000)")
+    parser.add_argument("--threshold", type=float, default=5.0, help="Convergence threshold (default: 0.5)")
+    parser.add_argument("--N_train", type=int, default=15000, help="Training samples (default: 2000)")
     parser.add_argument("--M_offline", type=int, default=DEFAULT_M_OFFLINE, help="Offline pool size (default: from config)")
     parser.add_argument("--regularization", type=float, default=DEFAULT_REGULARIZATION, help="Regularization parameter (default: from config)")
     parser.add_argument("--use_scaling", action="store_true", default=False, help="Use feature scaling (default: False)")
@@ -888,7 +932,7 @@ def main():
     parser.add_argument("--create_videos", action="store_true", default=False, help="Create cartpole videos (default: False)")
     parser.add_argument("--video_duration", type=int, default=30, help="Video duration in seconds (default: 10)")
     parser.add_argument("--video_fps", type=int, default=30, help="Video frames per second (default: 30)")
-    parser.add_argument("--video_initial_states", nargs='+', type=float, default=[0.0, 0.0, 3.0, -1.0], 
+    parser.add_argument("--video_initial_states", nargs='+', type=float, default=[0.0, 0.0, 1.0, 1.0], 
                        help="Initial state for videos [x, x_dot, theta, theta_dot] (default: [0, 0, 0.1, 0])")
     args = parser.parse_args()
     
@@ -946,7 +990,7 @@ def main():
         return
     
     # Create analyzer
-    analyzer = ConvergenceAnalyzer(system, extractor, mm_policy, lqr_policy)
+    analyzer = ConvergenceAnalyzer(system, extractor, mm_policy, lqr_policy, convergence_threshold)
     
     # Run convergence analysis
     print("\nStarting convergence analysis...")

@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.linalg import solve_discrete_are, inv
+from scipy.optimize import fsolve
 
 class dlqr:
     def __init__(self, A, B, C, rho, gamma, sigma=0.0):
@@ -19,6 +20,27 @@ class dlqr:
         # dimensions
         self.N_x = B.shape[0]
         self.N_u = B.shape[1]
+
+    def step(self, x, u):
+        """
+        Single-step state update for the linear system x_{t+1} = A x_t + B u_t.
+
+        Args:
+            x: state vector, shape (N_x,) or (N_x, 1)
+            u: control input, scalar or shape (N_u,) or (N_u, 1)
+
+        Returns:
+            x_next: next state vector, shape (N_x,)
+        """
+        x_arr = np.asarray(x).reshape(-1)
+        u_arr = np.asarray(u).reshape(-1)
+        # If u is scalar for single-input systems, broadcast to (N_u,)
+        if u_arr.size == 0:
+            u_arr = np.zeros(self.N_u)
+        if u_arr.size == 1 and self.N_u > 1:
+            u_arr = np.full(self.N_u, float(u_arr.item()))
+        x_next = self.A @ x_arr + self.B @ u_arr
+        return x_next
 
     def generate_samples(self, x_bounds, u_bounds, n_samples):
         """
@@ -98,24 +120,22 @@ class dlqr:
 
     def optimal_solution(self):
         """
-        Solve the infinite‐horizon discounted LQR via the discrete ARE:
-          P = solve_discrete_are(√γ A, B, Q, R/γ)
-        Then K = –γ (R + γ BᵀPB)⁻¹ Bᵀ P A.
-        Also returns the baseline noise cost q = σ² γ/(1–γ) trace(P).
+        Solve the infinite‐horizon LQR via the discrete ARE.
+        For gamma = 1.0: standard undiscounted LQR
+        For gamma < 1.0: discounted LQR
         """
-        # scale A and R for discount
-        Ad = np.sqrt(self.gamma) * self.A
-        Rd = self.R / self.gamma
-
-        # discrete algebraic Riccati
-        P = solve_discrete_are(Ad, self.B, self.Q, Rd)
-
-        # optimal gain
-        inv_term = inv(self.R + self.gamma * (self.B.T @ P @ self.B))
-        K = -self.gamma * (inv_term @ self.B.T @ P @ self.A)
-
-        # baseline cost from process noise
-        q = (self.sigma**2) * (self.gamma / (1 - self.gamma)) * np.trace(P)
+        if self.gamma == 1.0:
+            # Standard undiscounted LQR
+            P = solve_discrete_are(self.A, self.B, self.Q, self.R)
+            K = np.linalg.inv(self.R + self.B.T @ P @ self.B) @ self.B.T @ P @ self.A
+            q = 0.0  # No noise cost for undiscounted case
+        else:
+            # Discounted LQR
+            Ad = np.sqrt(self.gamma) * self.A
+            Rd = self.R / self.gamma
+            P = solve_discrete_are(Ad, self.B, self.Q, Rd)
+            K = self.gamma * (np.linalg.inv(self.R + self.gamma * (self.B.T @ P @ self.B)) @ self.B.T @ P @ self.A)
+            q = (self.sigma**2) * (self.gamma / (1 - self.gamma)) * np.trace(P)
 
         return P, K, q
 
@@ -163,7 +183,6 @@ class cart_pole:
         self.l = l
         
         self.g = 9.8
-        
         self.delta_t = delta_t
         
         self.gamma = gamma
@@ -178,33 +197,54 @@ class cart_pole:
         self.Q = C.T @ C
         self.R = rho * np.eye(self.N_u)
 
-    def linearized_system(self):
-        """Linearized cart-pole dynamics around upright equilibrium"""
-        A = np.array([[0, 1, 0, 0], 
-                      [0, 0, -self.m_p*self.g/self.m_c, 0],
-                      [0, 0, 0, 1], 
-                      [0, 0, (self.m_p+self.m_c)*self.g/(self.m_c*self.l), 0]])
-        B = np.array([[0], [1/self.m_c], [0], [1/(self.m_c*self.l)]])
+    def linearized_system(self, use_backward_euler=False):
+        """
+        Linearized cart-pole dynamics around upright equilibrium
         
-        A_d = np.eye(self.N_x) + self.delta_t * A
-        B_d = self.delta_t * B
+        Args:
+            use_backward_euler: If True, use backward Euler discretization
+                               If False, use forward Euler discretization
+        """
+        A = np.array([[0, 1, 0, 0], [0, 0, -3.0*self.m_p * self.g / (4.0*self.m_c + self.m_p), 0],\
+                          [0, 0, 0, 1], [0, 0, (3.0*(self.m_p + self.m_c)*self.g)/((4.0*self.m_c + self.m_p)*self.l), 0]])
+        B = np.array([[0], [4.0/(4.0*self.m_c + self.m_p)], [0], [-3.0/(self.l*(4.0*self.m_c + self.m_p))]])
+        # A = np.array([[0, 1, 0, 0], [0, 0, -self.m_p * self.g / self.m_c, 0],\
+        #                   [0, 0, 0, 1], [0, 0, (self.m_p + self.m_c)*self.g/(self.m_c*self.l), 0]])
+        # B = np.array([[0], [1.0/self.m_c], [0], [1.0/(self.m_c*self.l)]])
+        
+        if use_backward_euler:
+            # Backward Euler: A_d = (I - dt*A)^(-1), B_d = dt*(I - dt*A)^(-1)*B
+            I = np.eye(self.N_x)
+            A_d = inv(I - self.delta_t * A)
+            B_d = self.delta_t * A_d @ B
+        else:
+            # Forward Euler: A_d = I + dt*A, B_d = dt*B
+            A_d = np.eye(self.N_x) + self.delta_t * A
+            B_d = self.delta_t * B
         
         return A_d, B_d
 
     def _f1(self, theta, theta_dot, u):
         """Cart acceleration dynamics"""
-        return (
-            u + self.m_p*self.l*(theta_dot**2*np.sin(theta) - self._f2(theta, theta_dot, u)*np.cos(theta))
-        ) / (self.m_p + self.m_c)
+        temp = (u + self.m_p * self.l * theta_dot**2 * np.sin(theta)) / (self.m_c + self.m_p)
+        x_ddot = temp - self.m_p * self.l * self._f2(theta, theta_dot, u) * np.cos(theta) / (self.m_c + self.m_p)
+        # return (u + self.m_p* self.l * (np.sin(theta) *(theta_dot**2) - self._f2(theta, theta_dot, u)*np.cos(theta))) / (self.m_c + self.m_p)
+        # Solve the coupled system of equations simultaneously
+        # x_ddot, theta_ddot = self._solve_dynamics(theta, theta_dot, u)
+        return x_ddot
 
     def _f2(self, theta, theta_dot, u):
         """Pole angular acceleration dynamics"""
-        den = (self.m_p + self.m_c)*self.l - self.m_p*self.l*np.cos(theta)**2  # = l*Delta
-        return (
-            -u*np.cos(theta)
-            - self.m_p*self.l*theta_dot**2*np.sin(theta)*np.cos(theta)
-            - (self.m_p + self.m_c)*self.g*np.sin(theta)
-        ) / den
+        temp = (u + self.m_p * self.l * theta_dot**2 * np.sin(theta)) / (self.m_c + self.m_p)
+        D = self.l * (4.0/3.0 - (self.m_p * np.cos(theta)**2) / (self.m_c + self.m_p))
+
+        theta_ddot = (self.g * np.sin(theta) - np.cos(theta) * temp) / D
+
+        # return ((-u * np.cos(theta) - self.m_p*self.l*theta_dot**2*np.sin(theta)*np.cos(theta))/(self.m_p + self.m_c) + self.g*np.sin(theta))/D
+        return theta_ddot
+        # Solve the coupled system of equations simultaneously
+        # x_ddot, theta_ddot = self._solve_dynamics(theta, theta_dot, u)
+        # return theta_ddot
 
     def step(self, x, u):
         """
@@ -213,17 +253,18 @@ class cart_pole:
         u = force applied to cart
         """
         x_pos, x_vel, theta, theta_dot = x
+        u = float(u)
         
         # Compute derivatives
         x_pos_dot = x_vel
         x_vel_dot = self._f1(theta, theta_dot, u)
-        theta_dot_new = theta_dot
         theta_dot_dot = self._f2(theta, theta_dot, u)
         
         # Euler integration
         x_pos_new = x_pos + self.delta_t * x_pos_dot
         x_vel_new = x_vel + self.delta_t * x_vel_dot
-        theta_new = theta + self.delta_t * theta_dot_new
+        theta_new = theta + self.delta_t * theta_dot
+        # theta_new = (theta_new + np.pi) % (2*np.pi) - np.pi
         theta_dot_new = theta_dot + self.delta_t * theta_dot_dot
         
         return np.array([x_pos_new, x_vel_new, theta_new, theta_dot_new])
@@ -244,12 +285,15 @@ class cart_pole:
         
         return states, actions
     
-    def generate_samples(self, x_bounds, x_dot_bounds, theta_bounds, theta_dot_bounds, u_bounds, n_samples=None):
+    def generate_samples(self, x_bounds, x_dot_bounds, theta_bounds, theta_dot_bounds, u_bounds, n_samples=None, use_backward_euler=False):
         """Generate state transition samples"""
         X, U = self.generate_samples_auxiliary(x_bounds, x_dot_bounds, theta_bounds, theta_dot_bounds, u_bounds, n_samples=n_samples)
         
-        # Compute next states
-        X_plus = np.array([self.step(x, u[0]) for x, u in zip(X, U)])
+        # Compute next states using either forward or backward Euler
+        if use_backward_euler:
+            X_plus = np.array([self.step_backward_euler(x, u[0]) for x, u in zip(X, U)])
+        else:
+            X_plus = np.array([self.step(x, u[0]) for x, u in zip(X, U)])
         
         # Generate random next actions
         U_plus = np.random.uniform(*u_bounds, size=(n_samples, 1))

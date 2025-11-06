@@ -1,12 +1,10 @@
-from random import seed
 import numpy as np
-import cvxpy as cp
 from sklearn.preprocessing import PolynomialFeatures
-from utils import ScaleOnlyScaler
-from dynamical_systems import cart_pole, dlqr
+from feature_scaling import PolynomialFeatureScaler
+from dynamical_systems import cart_pole
 from policy_extraction import PolicyExtractor
-from scipy import sparse
-from moment_matching import solve_moment_matching_Q, solve_identity_Q
+from moment_matching import solve_identity_Q
+from moment_matching import solve_moment_matching_Q
 from config import (
     GAMMA, M_C, M_P, L, DT, C_CART_POLE, RHO_CART_POLE, DEGREE,
     X_BOUNDS, X_DOT_BOUNDS, THETA_BOUNDS, THETA_DOT_BOUNDS, U_BOUNDS,
@@ -34,10 +32,14 @@ theta_dot_bounds = THETA_DOT_BOUNDS
 u_bounds = U_BOUNDS
 
 def run_one(seed, N, M_offline=DEFAULT_M_OFFLINE, use_scaling=True, regularization=DEFAULT_REGULARIZATION, 
-                    data_pools=None, test_states=None, scaler=None, poly=None, return_mu=False, fixed_mu=None):
+                    data_pools=None, test_states=None, poly_scaler=None, return_mu=False, fixed_mu=None):
     """Generate data with given seed and N, then solve both LPs and return boundedness flags."""
     # Build system and data
-    extractor = PolicyExtractor(degree=degree)
+    extractor = PolicyExtractor(
+        degree=degree,
+        M_c=M_c, M_p=M_p, l=l, dt=dt,
+        C=C, rho=rho
+    )
     system = cart_pole(M_c, M_p, l, dt, C, rho, gamma, N, M_offline)
 
     lqr_policy, _, _ = extractor.extract_lqr_policy(system)
@@ -62,43 +64,25 @@ def run_one(seed, N, M_offline=DEFAULT_M_OFFLINE, use_scaling=True, regularizati
     # Compute costs (needed for both scaling and non-scaling cases)
     L_xu = system.cost(x, u)
 
-    # Handle polynomial feature generation based on whether scaling is used
-    if use_scaling:
-        # Use provided scaler (fitted on full dataset)
-        Z_all_scaled = scaler.transform(Z_all)
-        
-        # poly was fitted on scaled data, so use scaled data
-        P_all = poly.transform(Z_all_scaled)
+    # Handle polynomial feature generation based on whether robust scaler is used
+    if poly_scaler is not None:
+        # Use robust polynomial feature scaler (for degree 2+)
+        P_all = poly_scaler.transform(Z_all)
         
         P_z = P_all[:N]
         P_z_next = P_all[N:]
         
         y = np.concatenate([x_aux, u_aux], axis=1)  # (M, dx+du)
-        y_scaled = scaler.transform(y)
-        P_y = poly.transform(y_scaled)
+        P_y = poly_scaler.transform(y)
         
-        # Use scaled features for moment matching
+        # Use robust scaled features for moment matching
         Q_mm, mu, status_info = solve_moment_matching_Q(
             P_z, P_z_next, P_y, L_xu, N, M_offline, gamma,
+            # P_z, P_z_next, P_y, L_xu_scaled, N, M_offline, gamma,
             regularization=regularization, fixed_mu=fixed_mu
         )
-
-        L_xu = L_xu / scaler.scale_[-1]
     else:
-        # poly was fitted on unscaled data, so use unscaled data
-        P_all = poly.transform(Z_all)
-        
-        P_z = P_all[:N]
-        P_z_next = P_all[N:]
-        
-        y = np.concatenate([x_aux, u_aux], axis=1)  # (M, dx+du)
-        P_y = poly.transform(y)
-        
-        # Use original features for moment matching
-        Q_mm, mu, status_info = solve_moment_matching_Q(
-            P_z, P_z_next, P_y, L_xu, N, M_offline, gamma,
-            regularization=regularization, fixed_mu=fixed_mu
-        )
+        raise ValueError("Scaling method not supported")
         # print(f"eigenvalues of Q_mm: {np.linalg.eigvals(Q_mm)}")
     
     status_m2 = status_info["stage2_status"]
@@ -106,43 +90,47 @@ def run_one(seed, N, M_offline=DEFAULT_M_OFFLINE, use_scaling=True, regularizati
 
     # Extract policy using the analytical method
     if Q_mm is not None:
-        # # Check value function positivity before extracting policy
-        # print("\n=== Checking Value Function Positivity ===")
-        positivity_results = extractor.check_value_function_positivity(
-            Q_mm, poly, scaler, n_samples=1000, verbose=False
-        )
         
-        if use_scaling and scaler is not None:
-            # print("Using analytical policy extraction with scaling")
+        if poly_scaler is not None:
+            # Use robust polynomial scaler for policy extraction
+            # For robust polynomial scalers, we need to handle the scaling differently
             mm_policy = extractor.extract_moment_matching_policy_analytical(
-                system, Q_mm, poly, scaler
+                system, Q_mm, poly_scaler  # Pass the poly_scaler
             )
-            # print("Using scipy optimization policy extraction with scaling")
-            # mm_policy = extractor.extract_policy_scipy_optimization(
-            #     system, Q_mm, poly, scaler
+            # mm_policy = extractor.extract_policy_grid_search(
+            #     system, Q_mm, poly_scaler=poly_scaler, n_grid_points=101
             # )
         else:
-            # print("Using analytical policy extraction without scaling")
-            mm_policy = extractor.extract_moment_matching_policy_analytical(
-                system, Q_mm, poly
-            )
-            # print("Using scipy optimization policy extraction without scaling")
-            # mm_policy = extractor.extract_policy_scipy_optimization(
-            #     system, Q_mm, poly
-            # )
+            raise ValueError("Scaling method not supported")
+
+        # comparison_results = extractor.compare_policy_methods(system, Q_mm, poly, scaler, n_grid_points=200)
+        # # Plot action differences
+        # import matplotlib.pyplot as plt
+        # plt.figure(figsize=(12, 4))
+
+        # plt.subplot(1, 2, 1)
+        # plt.scatter(comparison_results['grid_actions'], comparison_results['analytical_actions'])
+        # plt.plot([-10, 10], [-10, 10], 'r--', alpha=0.5)  # Perfect agreement line
+        # plt.xlabel('Grid Search Actions')
+        # plt.ylabel('Analytical Actions')
+        # plt.title('Action Comparison')
+        # plt.grid(True, alpha=0.3)
+
+        # plt.subplot(1, 2, 2)
+        # plt.scatter(comparison_results['grid_q_values'], comparison_results['analytical_q_values'])
+        # plt.plot([0, 100], [0, 100], 'r--', alpha=0.5)  # Perfect agreement line
+        # plt.xlabel('Grid Search Q-values')
+        # plt.ylabel('Analytical Q-values')
+        # plt.title('Q-value Comparison')
+        # plt.grid(True, alpha=0.3)
+
+        # plt.tight_layout()
+        # plt.show()
+
     else:
         # Create a dummy policy that always returns 0 if moment matching failed
         print("Moment matching failed")
         mm_policy = None
-        positivity_results = {
-            "all_positive": False,
-            "positive_ratio": 0.0,
-            "min_value": np.inf,
-            "max_value": -np.inf,
-            "mean_value": np.nan,
-            "n_samples": 0,
-            "error": "Q_matrix is None"
-        }
 
     # Identity baseline
     status_id = solve_identity_Q(P_z, P_z_next, L_xu, N, gamma)
@@ -151,12 +139,191 @@ def run_one(seed, N, M_offline=DEFAULT_M_OFFLINE, use_scaling=True, regularizati
     if test_states is None:
         test_states, _ = system.generate_samples_auxiliary(
             (-1.0, 1.0), (-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5),
-            extractor.u_bounds, n_samples=50
+            extractor.u_bounds, n_samples=10
         )
 
-    if mm_policy is not None:
+    # Optionally replace MM policy with a multivariate cubic surrogate in full state to stabilize degree-2 behavior
+    cubic_metrics = None
+    policy_for_eval = mm_policy
+    # if mm_policy is not None and degree == 2:
+    #     try:
+    #         # Improved sampling strategy: mix uniform + focused sampling near equilibrium
+    #         # More samples for better accuracy
+    #         n_fit = 5000  # Increased from 2000
+    #         n_fit_uniform = int(0.7 * n_fit)  # 70% uniform
+    #         n_fit_focused = n_fit - n_fit_uniform  # 30% focused near equilibrium
+            
+    #         rng = np.random.default_rng(seed + 12345)
+    #         X_fit = np.empty((n_fit, 4), dtype=float)
+            
+    #         # Uniform sampling (broader coverage)
+    #         X_fit[:n_fit_uniform, 0] = rng.uniform(x_bounds[0], x_bounds[1], size=n_fit_uniform)
+    #         X_fit[:n_fit_uniform, 1] = rng.uniform(x_dot_bounds[0], x_dot_bounds[1], size=n_fit_uniform)
+    #         X_fit[:n_fit_uniform, 2] = rng.uniform(theta_bounds[0], theta_bounds[1], size=n_fit_uniform)
+    #         X_fit[:n_fit_uniform, 3] = rng.uniform(theta_dot_bounds[0], theta_dot_bounds[1], size=n_fit_uniform)
+            
+    #         # Focused sampling near equilibrium (more important for control)
+    #         focus_scale = 0.3  # Sample within 30% of range around equilibrium
+    #         X_fit[n_fit_uniform:, 0] = rng.normal(0, (x_bounds[1] - x_bounds[0]) * focus_scale, size=n_fit_focused)
+    #         X_fit[n_fit_uniform:, 1] = rng.normal(0, (x_dot_bounds[1] - x_dot_bounds[0]) * focus_scale, size=n_fit_focused)
+    #         X_fit[n_fit_uniform:, 2] = rng.normal(0, (theta_bounds[1] - theta_bounds[0]) * focus_scale, size=n_fit_focused)
+    #         X_fit[n_fit_uniform:, 3] = rng.normal(0, (theta_dot_bounds[1] - theta_dot_bounds[0]) * focus_scale, size=n_fit_focused)
+            
+    #         # Clip to bounds
+    #         X_fit[:, 0] = np.clip(X_fit[:, 0], x_bounds[0], x_bounds[1])
+    #         X_fit[:, 1] = np.clip(X_fit[:, 1], x_dot_bounds[0], x_dot_bounds[1])
+    #         X_fit[:, 2] = np.clip(X_fit[:, 2], theta_bounds[0], theta_bounds[1])
+    #         X_fit[:, 3] = np.clip(X_fit[:, 3], theta_dot_bounds[0], theta_dot_bounds[1])
+
+    #         # Targets from MM policy
+    #         u_fit = np.array([float(mm_policy(X_fit[i])) for i in range(n_fit)], dtype=float)
+
+    #         # Optionally scale states before polynomial expansion if scaler is available
+    #         X_basis = X_fit
+    #         if poly_scaler is not None and hasattr(poly_scaler, 'scaler_x') and poly_scaler.scaler_x is not None:
+    #             X_basis = poly_scaler.scaler_x.transform(X_fit)
+
+    #         # Multivariate cubic features
+    #         poly3 = PolynomialFeatures(3, include_bias=True)
+    #         Phi = poly3.fit_transform(X_basis)
+
+    #         # Improved regularization: cross-validate to find optimal lambda
+    #         # Try multiple regularization values and pick best
+    #         lambda_candidates = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4]
+    #         best_lam = 1e-6
+    #         best_r2 = -np.inf
+            
+    #         # Use a subset for quick validation
+    #         n_val_internal = min(500, n_fit // 4)
+    #         val_indices = rng.choice(n_fit, size=n_val_internal, replace=False)
+    #         train_indices = np.setdiff1d(np.arange(n_fit), val_indices)
+            
+    #         Phi_train = Phi[train_indices]
+    #         u_train = u_fit[train_indices]
+    #         Phi_val_internal = Phi[val_indices]
+    #         u_val_internal = u_fit[val_indices]
+            
+    #         for lam in lambda_candidates:
+    #             try:
+    #                 A = Phi_train.T @ Phi_train + lam * np.eye(Phi.shape[1])
+    #                 b = Phi_train.T @ u_train
+    #                 coeffs_cv = np.linalg.solve(A, b)
+                    
+    #                 u_pred_cv = Phi_val_internal @ coeffs_cv
+    #                 resid_cv = u_val_internal - u_pred_cv
+    #                 ss_res_cv = np.sum(resid_cv**2)
+    #                 ss_tot_cv = np.sum((u_val_internal - np.mean(u_val_internal))**2)
+    #                 r2_cv = 1.0 - ss_res_cv / ss_tot_cv if ss_tot_cv > 0 else -np.inf
+                    
+    #                 if r2_cv > best_r2:
+    #                     best_r2 = r2_cv
+    #                     best_lam = lam
+    #             except:
+    #                 continue
+            
+    #         # Fit final model with best lambda on full training set
+    #         lam = best_lam
+    #         A = Phi.T @ Phi + lam * np.eye(Phi.shape[1])
+    #         b = Phi.T @ u_fit
+    #         coeffs = np.linalg.solve(A, b)
+
+    #         # Define surrogate policy over full state
+    #         def cubic_policy_full(state):
+    #             s = np.atleast_2d(state.astype(float)) if isinstance(state, np.ndarray) else np.atleast_2d(np.array(state, dtype=float))
+    #             S = s
+    #             if poly_scaler is not None and hasattr(poly_scaler, 'scaler_x') and poly_scaler.scaler_x is not None:
+    #                 S = poly_scaler.scaler_x.transform(S)
+    #             phi = poly3.transform(S)
+    #             u = phi @ coeffs
+    #             u = float(u.ravel()[0]) if u.size == 1 else u.ravel()
+    #             return float(np.clip(u, u_bounds[0], u_bounds[1]))
+
+    #         # Evaluate fit on a validation set
+    #         n_val = 500
+    #         X_val = np.empty((n_val, 4), dtype=float)
+    #         X_val[:, 0] = rng.uniform(x_bounds[0], x_bounds[1], size=n_val)
+    #         X_val[:, 1] = rng.uniform(x_dot_bounds[0], x_dot_bounds[1], size=n_val)
+    #         X_val[:, 2] = rng.uniform(theta_bounds[0], theta_bounds[1], size=n_val)
+    #         X_val[:, 3] = rng.uniform(theta_dot_bounds[0], theta_dot_bounds[1], size=n_val)
+    #         u_true = np.array([float(mm_policy(X_val[i])) for i in range(n_val)], dtype=float)
+    #         S_val = X_val if (poly_scaler is None or getattr(poly_scaler, 'scaler_x', None) is None) else poly_scaler.scaler_x.transform(X_val)
+    #         Phi_val = poly3.transform(S_val)
+    #         u_pred = Phi_val @ coeffs
+    #         u_pred = u_pred.reshape(-1)
+    #         resid = u_true - u_pred
+    #         rmse = float(np.sqrt(np.mean(resid**2)))
+    #         mae = float(np.mean(np.abs(resid)))
+    #         ss_res = float(np.sum(resid**2))
+    #         ss_tot = float(np.sum((u_true - np.mean(u_true))**2))
+    #         r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    #         cubic_metrics = {"rmse": rmse, "mae": mae, "r2": r2}
+            
+    #         # Additional diagnostic metrics
+    #         abs_resid = np.abs(resid)
+    #         u_range = u_bounds[1] - u_bounds[0]
+    #         u_std = np.std(u_true)
+    #         u_mean_abs = np.mean(np.abs(u_true))
+            
+    #         # Relative errors (normalized by action range and magnitude)
+    #         rel_error_range = mae / u_range if u_range > 0 else 0  # Error as fraction of action range
+    #         rel_error_magnitude = mae / (u_mean_abs + 1e-8)  # Error relative to typical action magnitude
+    #         rel_error_std = mae / (u_std + 1e-8)  # Error relative to action variability
+            
+    #         # Percentile analysis
+    #         p95 = np.percentile(abs_resid, 95)
+    #         p99 = np.percentile(abs_resid, 99)
+    #         max_error = np.max(abs_resid)
+            
+    #         # Correlation
+    #         correlation = np.corrcoef(u_true, u_pred)[0, 1]
+            
+    #         # Print comprehensive validation statistics
+    #         print(f"\n=== Cubic Polynomial Surrogate Validation ===")
+    #         print(f"Number of training samples: {n_fit} ({n_fit_uniform} uniform + {n_fit_focused} focused near equilibrium)")
+    #         print(f"Number of validation samples: {n_val}")
+    #         print(f"Optimal regularization (lambda): {best_lam:.2e} (selected via cross-validation)")
+    #         print(f"\n--- Absolute Error Metrics ---")
+    #         print(f"RMSE: {rmse:.6f}")
+    #         print(f"MAE: {mae:.6f}")
+    #         print(f"Max absolute error: {max_error:.6f}")
+    #         print(f"95th percentile error: {p95:.6f}")
+    #         print(f"99th percentile error: {p99:.6f}")
+    #         print(f"\n--- Relative Error Metrics ---")
+    #         print(f"MAE / Action range: {rel_error_range:.4%} (smaller is better)")
+    #         print(f"MAE / Mean |action|: {rel_error_magnitude:.4%} (smaller is better)")
+    #         print(f"MAE / Action std: {rel_error_std:.4%} (smaller is better)")
+    #         print(f"\n--- Fit Quality Metrics ---")
+    #         print(f"R²: {r2:.6f} (1.0 = perfect, >0.99 = excellent, >0.95 = good)")
+    #         print(f"Correlation: {correlation:.6f} (1.0 = perfect)")
+    #         print(f"\n--- Residual Statistics ---")
+    #         print(f"  Mean: {np.mean(resid):.6f} (should be ~0 for unbiased fit)")
+    #         print(f"  Std: {np.std(resid):.6f}")
+    #         print(f"  Min: {np.min(resid):.6f}")
+    #         print(f"  Max: {np.max(resid):.6f}")
+    #         print(f"\n--- Action Statistics (for reference) ---")
+    #         print(f"  Action range: [{u_bounds[0]:.2f}, {u_bounds[1]:.2f}]")
+    #         print(f"  Mean |action|: {u_mean_abs:.6f}")
+    #         print(f"  Action std: {u_std:.6f}")
+    #         print(f"  Action range size: {u_range:.2f}")
+    #         print(f"\n--- Interpretation ---")
+    #         if r2 > 0.99 and rel_error_range < 0.01:
+    #             print(f"✓ Excellent approximation: R² > 0.99, error < 1% of action range")
+    #         elif r2 > 0.95 and rel_error_range < 0.05:
+    #             print(f"✓ Good approximation: R² > 0.95, error < 5% of action range")
+    #         elif r2 > 0.90:
+    #             print(f"⚠ Moderate approximation: R² > 0.90, may have some inaccuracies")
+    #         else:
+    #             print(f"✗ Poor approximation: R² < 0.90, consider using original MM policy")
+    #         print(f"=============================================\n")
+
+    #         policy_for_eval = cubic_policy_full
+    #     except Exception as e:
+    #         print("Multivariate cubic fit failed, using original MM policy:", e)
+    #         policy_for_eval = mm_policy
+
+    if policy_for_eval is not None:
         results_policy = extractor.compare_policies(
-            system, lqr_policy, mm_policy, test_states, horizon=3000
+            system, lqr_policy, policy_for_eval, test_states, N, horizon=10000
         )
     else:
         print("Moment matching failed")
@@ -200,13 +367,17 @@ def run_one(seed, N, M_offline=DEFAULT_M_OFFLINE, use_scaling=True, regularizati
         "mm_costs_std": results_policy.get("mm_costs_std", 0.0),
         "lqr_costs_median": results_policy.get("lqr_costs_median", 0.0),
         "mm_costs_median": results_policy.get("mm_costs_median", 0.0),
+        # Cubic surrogate metrics (if used)
+        "cubic_rmse": cubic_metrics["rmse"] if cubic_metrics is not None else None,
+        "cubic_mae": cubic_metrics["mae"] if cubic_metrics is not None else None,
+        "cubic_r2": cubic_metrics["r2"] if cubic_metrics is not None else None,
         # Value function positivity check results
-        "value_function_all_positive": positivity_results["all_positive"],
-        "value_function_positive_ratio": positivity_results["positive_ratio"],
-        "value_function_min_value": positivity_results["min_value"],
-        "value_function_max_value": positivity_results["max_value"],
-        "value_function_mean_value": positivity_results["mean_value"],
-        "value_function_n_samples": positivity_results["n_samples"],
+        # "value_function_all_positive": positivity_results["all_positive"],
+        # "value_function_positive_ratio": positivity_results["positive_ratio"],
+        # "value_function_min_value": positivity_results["min_value"],
+        # "value_function_max_value": positivity_results["max_value"],
+        # "value_function_mean_value": positivity_results["mean_value"],
+        # "value_function_n_samples": positivity_results["n_samples"],
     }
     
     if return_mu:
@@ -227,7 +398,11 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
         
         # Generate data pools once per seed for nested datasets
         np.random.seed(seed)
-        extractor = PolicyExtractor(degree=degree)
+        extractor = PolicyExtractor(
+            degree=degree,
+            M_c=M_c, M_p=M_p, l=l, dt=dt,
+            C=C, rho=rho
+        )
         system_temp = cart_pole(M_c, M_p, l, dt, C, rho, gamma, N_max, M_offline)
         
         # Generate large pool of training data
@@ -242,8 +417,8 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
         
         # Generate test states (fixed for all N)
         test_states, _ = system_temp.generate_samples_auxiliary(
-            (-1.0, 1.0), (-1.0, 1.0), (-0.5, 0.5), (-0.5, 0.5),
-            extractor.u_bounds, n_samples=50
+            (0.0, 0.0), (0.0, 0.0), (-1.0, 1.0), (0.0, 0.0),
+            extractor.u_bounds, n_samples=5
         )
         
         # Create data pools dictionary
@@ -261,23 +436,36 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
         z_plus_pool = np.concatenate([x_plus_pool, u_plus_pool], axis=1)
         Z_pool = np.concatenate([z_pool, z_plus_pool], axis=0)
         
-        # Fit scaler on full dataset if using scaling
-        scaler = None
+        # Use robust polynomial feature scaler for degree 2+, standard for degree 1
         if use_scaling:
-            # Create scale-only scaler (no centering, only division by std)
-            scaler = ScaleOnlyScaler()
-            scaler.fit(Z_pool)
-            Z_pool_scaled = scaler.transform(Z_pool)
-            print(f"  Fitted scale-only scaler on {len(Z_pool)} samples for seed {seed}")
+            # Use robust polynomial feature scaler with separate scaling for states and actions
+            # Determine dimensions from the data
+            dx = x_pool.shape[1]  # State dimensions
+            du = u_pool.shape[1]   # Action dimensions
+            
+            # For degree 1, use standard scaling (with centering) to ensure position is centered around 0
+            # For degree 2+, use robust scaling for better numerical stability
+            scaling_method = 'standard' # if degree == 1 else 'robust'
+            
+            poly_scaler = PolynomialFeatureScaler(
+                degree=degree, 
+                scaling_method=scaling_method,
+                dx=dx,
+                du=du
+            )
+            P_pool = poly_scaler.fit_transform(Z_pool)
+            print(f"  Fitted {scaling_method} polynomial scaler (degree={degree}, dx={dx}, du={du}) on {len(Z_pool)} samples for seed {seed}")
+            
         else:
-            Z_pool_scaled = Z_pool
-        
-        # Fit polynomial features on the appropriately scaled data
-        poly = PolynomialFeatures(degree=degree, include_bias=False)
-        poly.fit(Z_pool_scaled)  # Fit on scaled data if scaling is used
+            poly_scaler = PolynomialFeatureScaler(
+                degree=degree, 
+                scaling_method='none'
+            )
+            P_pool = poly_scaler.fit_transform(Z_pool)
+            print(f"  Fitted polynomial scaler (degree={degree}) on {len(Z_pool)} samples for seed {seed}")
         
         print(f"  Generated data pools: {len(x_pool)} training samples, {len(x_aux)} auxiliary samples, {len(test_states)} test states")
-        
+
         # Run experiments for each N using nested datasets
         mu_fixed = None
         for i, N in enumerate(N_values):
@@ -287,7 +475,7 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
                 result = run_one(
                     seed=seed, N=int(N), M_offline=M_offline, 
                     use_scaling=use_scaling, regularization=regularization,
-                    data_pools=data_pools, test_states=test_states, scaler=scaler, poly=poly,
+                    data_pools=data_pools, test_states=test_states, poly_scaler=poly_scaler,
                     return_mu=True
                 )
                 if result is not None and len(result) == 2:
@@ -300,7 +488,7 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
                     results.append(run_one(
                         seed=seed, N=int(N), M_offline=M_offline, 
                         use_scaling=use_scaling, regularization=regularization,
-                        data_pools=data_pools, test_states=test_states, scaler=scaler, poly=poly
+                        data_pools=data_pools, test_states=test_states, poly_scaler=poly_scaler
                     ))
             else:
                 # For subsequent N values, use the fixed mu
@@ -309,7 +497,7 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
                     results.append(run_one(
                         seed=seed, N=int(N), M_offline=M_offline, 
                         use_scaling=use_scaling, regularization=regularization,
-                        data_pools=data_pools, test_states=test_states, scaler=scaler, poly=poly,
+                        data_pools=data_pools, test_states=test_states, poly_scaler=poly_scaler,
                         fixed_mu=mu_fixed
                     ))
                 else:
@@ -317,7 +505,7 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
                     results.append(run_one(
                         seed=seed, N=int(N), M_offline=M_offline, 
                         use_scaling=use_scaling, regularization=regularization,
-                        data_pools=data_pools, test_states=test_states, scaler=scaler, poly=poly
+                        data_pools=data_pools, test_states=test_states, poly_scaler=poly_scaler
                     ))
     
     return results
@@ -325,13 +513,13 @@ def sweep(N_values=range(50, 501, 50), seeds=range(10), M_offline=DEFAULT_M_OFFL
 if __name__ == "__main__":
     import argparse, json
     parser = argparse.ArgumentParser(description="Percentage boundedness of LPs vs N.")
-    parser.add_argument("--seeds", type=int, default=10, help="Number of seeds per N (default: 10)")
-    parser.add_argument("--Nmin", type=int, default=250, help="Min N (default: 100)")
+    parser.add_argument("--seeds", type=int, default=2, help="Number of seeds per N (default: 10)")
+    parser.add_argument("--Nmin", type=int, default=500, help="Min N (default: 100)")
     parser.add_argument("--Nmax", type=int, default=5000, help="Max N (default: 2000)")
     parser.add_argument("--Nstep", type=int, default=250, help="Step for N (default: 100)")
-    parser.add_argument("--out_json", type=str, default="../results/test_analytical_noscaling_deg1_1e-2_mu_sum_1000M_mix.json", help="Where to save raw results JSON")
-    parser.add_argument("--plot_png", type=str, default="../figures/test_analytical_noscaling_deg1_1e-2_mu_sum_1000M_mix.pdf", help="Where to save the plot")
-    parser.add_argument("--plot_policy", type=str, default="../figures/test_policy_analytical_noscaling_deg1_1e-2_mu_sum_1000M_mix.pdf", help="Where to save the policy comparison plot")
+    parser.add_argument("--out_json", type=str, default="../results/test_analytical_noscaling_deg1_1e-1_mu_sum_1000M.json", help="Where to save raw results JSON")
+    parser.add_argument("--plot_png", type=str, default="../figures/test_analytical_noscaling_deg1_1e-1_mu_sum_1000M.pdf", help="Where to save the plot")
+    parser.add_argument("--plot_policy", type=str, default="../figures/test_policy_analytical_noscaling_deg1_1e-2_mu_sum_1000M.pdf", help="Where to save the policy comparison plot")
     parser.add_argument("--M_offline", type=int, default=1000, help="Offline pool size (default: 500)")
     parser.add_argument("--use_scaling", action="store_true", default=False, help="Use feature scaling (default: False)")
     parser.add_argument("--regularization", type=float, default=1e-4, help="Regularization parameter (default: 1e-4)")
@@ -340,6 +528,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     N_values = list(range(args.Nmin, args.Nmax + 1, args.Nstep))
     seeds = list(range(args.seeds))
+    # seeds = [s+6 for s in range(args.seeds)]
 
     try:
         results = sweep(

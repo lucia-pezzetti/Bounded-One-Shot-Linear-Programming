@@ -11,7 +11,7 @@ from policy_extraction import PolicyExtractor
 # -------------------------
 # Config (defaults; can be overridden by CLI)
 # -------------------------
-degree = 1           # polynomial feature degree
+degree = 2           # polynomial feature degree
 M_offline = 500      # auxiliary pool size for building P_y
 
 # Sampling bounds for generating (x,u) datasets
@@ -589,18 +589,18 @@ if __name__ == "__main__":
                 print(f"{metric_name}: No successful comparisons")
     
     # Create plots
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
     
     # Plot 1: Boundedness percentages
-    axes[0, 0].plot(agg["dx"], agg["moment_bounded_pct"],
+    axes[0].plot(agg["dx"], agg["moment_bounded_pct"],
                     marker="o", label="Moment matching", color="blue")
-    axes[0, 0].plot(agg["dx"], agg["identity_bounded_pct"],
+    axes[0].plot(agg["dx"], agg["identity_bounded_pct"],
                     marker="s", label="Identity covariance", color="red")
-    axes[0, 0].set_xlabel("State dimension (dx)")
-    axes[0, 0].set_ylabel("Bounded LPs (%)")
-    axes[0, 0].set_title("Percentage of bounded LP problems vs state dimension")
-    axes[0, 0].legend()
-    axes[0, 0].grid(True)
+    axes[0].set_xlabel("State dimension")
+    axes[0].set_ylabel("Bounded LPs (%)")
+    axes[0].set_title("Percentage of bounded LP problems vs state dimension")
+    axes[0].legend()
+    axes[0].grid(True)
     
     # Plot 2: Trace difference (normalized and filtered by boundedness threshold)
     if "trace_diff_mean" in agg.columns:
@@ -610,73 +610,73 @@ if __name__ == "__main__":
         
         if len(filtered_agg) > 0:
             # Plot the mean line
-            axes[0, 1].plot(filtered_agg["dx"], filtered_agg["trace_diff_mean"], 
+            axes[1].plot(filtered_agg["dx"], filtered_agg["trace_diff_mean"], 
                            marker="o", color="blue", label="Mean")
             # Add shaded region for min-max range
             if "trace_diff_min" in filtered_agg.columns and "trace_diff_max" in filtered_agg.columns:
-                axes[0, 1].fill_between(filtered_agg["dx"], filtered_agg["trace_diff_min"], filtered_agg["trace_diff_max"], 
+                axes[1].fill_between(filtered_agg["dx"], filtered_agg["trace_diff_min"], filtered_agg["trace_diff_max"], 
                                        alpha=0.3, color="blue", label="Min-Max range")
             
-            axes[0, 1].set_xlabel("State dimension (dx)")
-            axes[0, 1].set_ylabel("Relative trace error")
-            axes[0, 1].set_title(f"Q matrix trace difference vs dimension\n(≥{threshold}% boundedness)")
-            axes[0, 1].grid(True)
-            axes[0, 1].legend()
+            axes[1].set_xlabel("State dimension")
+            axes[1].set_ylabel("Relative trace error")
+            axes[1].set_title(f"Q matrix trace difference vs dimension")
+            axes[1].grid(True)
+            axes[1].legend()
             
             print(f"Trace plot shows {len(filtered_agg)} dimensions with ≥{threshold}% boundedness")
         else:
-            axes[0, 1].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+            axes[1].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
                            ha="center", va="center", transform=axes[0, 1].transAxes)
-            axes[0, 1].set_title(f"Q matrix trace difference vs dimension\n(≥{threshold}% boundedness)")
+            axes[1].set_title(f"Q matrix trace difference vs dimension\n(≥{threshold}% boundedness)")
             print(f"No dimensions found with ≥{threshold}% boundedness")
     else:
-        axes[0, 1].text(0.5, 0.5, "No trace difference data available", 
+        axes[1].text(0.5, 0.5, "No trace difference data available", 
                        ha="center", va="center", transform=axes[0, 1].transAxes)
-        axes[0, 1].set_title("Q matrix trace difference vs dimension")
+        axes[1].set_title("Q matrix trace difference vs dimension")
     
-    # Plot 3: Q-value difference
-    q_diff_col = "q_value_diff_mean_mean" if "q_value_diff_mean_mean" in agg.columns else None
-    if q_diff_col:
-        # Plot the mean line
-        axes[1, 0].plot(agg["dx"], agg[q_diff_col], 
-                       marker="o", color="red", label="Mean")
-        # Add shaded region for min-max range
-        if "q_value_diff_mean_min" in agg.columns and "q_value_diff_mean_max" in agg.columns:
-            axes[1, 0].fill_between(agg["dx"], agg["q_value_diff_mean_min"], agg["q_value_diff_mean_max"], 
-                                   alpha=0.3, color="red", label="Min-Max range")
-        axes[1, 0].set_xlabel("State dimension (dx)")
-        axes[1, 0].set_ylabel("Q-value difference (mean)")
-        axes[1, 0].set_title("Q-function value difference vs dimension")
-        axes[1, 0].grid(True)
-        axes[1, 0].legend()
-    else:
-        axes[1, 0].text(0.5, 0.5, "No Q-value difference data available", 
-                       ha="center", va="center", transform=axes[1, 0].transAxes)
-        axes[1, 0].set_title("Q-function value difference vs dimension")
+    # # Plot 3: Q-value difference
+    # q_diff_col = "q_value_diff_mean_mean" if "q_value_diff_mean_mean" in agg.columns else None
+    # if q_diff_col:
+    #     # Plot the mean line
+    #     axes[1, 0].plot(agg["dx"], agg[q_diff_col], 
+    #                    marker="o", color="red", label="Mean")
+    #     # Add shaded region for min-max range
+    #     if "q_value_diff_mean_min" in agg.columns and "q_value_diff_mean_max" in agg.columns:
+    #         axes[1, 0].fill_between(agg["dx"], agg["q_value_diff_mean_min"], agg["q_value_diff_mean_max"], 
+    #                                alpha=0.3, color="red", label="Min-Max range")
+    #     axes[1, 0].set_xlabel("State dimension (dx)")
+    #     axes[1, 0].set_ylabel("Q-value difference (mean)")
+    #     axes[1, 0].set_title("Q-function value difference vs dimension")
+    #     axes[1, 0].grid(True)
+    #     axes[1, 0].legend()
+    # else:
+    #     axes[1, 0].text(0.5, 0.5, "No Q-value difference data available", 
+    #                    ha="center", va="center", transform=axes[1, 0].transAxes)
+    #     axes[1, 0].set_title("Q-function value difference vs dimension")
     
-    # Plot 4: Q-value correlation
-    q_corr_col = "q_value_correlation_mean" if "q_value_correlation_mean" in agg.columns else None
-    if q_corr_col:
-        # Plot the mean line
-        axes[1, 1].plot(agg["dx"], agg[q_corr_col], 
-                       marker="o", color="green", label="Mean")
-        # Add shaded region for min-max range
-        if "q_value_correlation_min" in agg.columns and "q_value_correlation_max" in agg.columns:
-            # Ensure bounds stay within [0, 1] for correlation
-            upper_bound = np.clip(agg["q_value_correlation_max"], 0, 1)
-            lower_bound = np.clip(agg["q_value_correlation_min"], 0, 1)
-            axes[1, 1].fill_between(agg["dx"], lower_bound, upper_bound, 
-                                   alpha=0.3, color="green", label="Min-Max range")
-        axes[1, 1].set_xlabel("State dimension (dx)")
-        axes[1, 1].set_ylabel("Q-value correlation")
-        axes[1, 1].set_title("Q-function value correlation vs dimension")
-        axes[1, 1].grid(True)
-        axes[1, 1].set_ylim([0, 1])  # Correlation is between 0 and 1
-        axes[1, 1].legend()
-    else:
-        axes[1, 1].text(0.5, 0.5, "No Q-value correlation data available", 
-                       ha="center", va="center", transform=axes[1, 1].transAxes)
-        axes[1, 1].set_title("Q-function value correlation vs dimension")
+    # # Plot 4: Q-value correlation
+    # q_corr_col = "q_value_correlation_mean" if "q_value_correlation_mean" in agg.columns else None
+    # if q_corr_col:
+    #     # Plot the mean line
+    #     axes[1, 1].plot(agg["dx"], agg[q_corr_col], 
+    #                    marker="o", color="green", label="Mean")
+    #     # Add shaded region for min-max range
+    #     if "q_value_correlation_min" in agg.columns and "q_value_correlation_max" in agg.columns:
+    #         # Ensure bounds stay within [0, 1] for correlation
+    #         upper_bound = np.clip(agg["q_value_correlation_max"], 0, 1)
+    #         lower_bound = np.clip(agg["q_value_correlation_min"], 0, 1)
+    #         axes[1, 1].fill_between(agg["dx"], lower_bound, upper_bound, 
+    #                                alpha=0.3, color="green", label="Min-Max range")
+    #     axes[1, 1].set_xlabel("State dimension (dx)")
+    #     axes[1, 1].set_ylabel("Q-value correlation")
+    #     axes[1, 1].set_title("Q-function value correlation vs dimension")
+    #     axes[1, 1].grid(True)
+    #     axes[1, 1].set_ylim([0, 1])  # Correlation is between 0 and 1
+    #     axes[1, 1].legend()
+    # else:
+    #     axes[1, 1].text(0.5, 0.5, "No Q-value correlation data available", 
+    #                    ha="center", va="center", transform=axes[1, 1].transAxes)
+    #     axes[1, 1].set_title("Q-function value correlation vs dimension")
     
     plt.tight_layout()
     plt.savefig(args.plot_dir, dpi=150)
