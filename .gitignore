@@ -1,2 +1,26 @@
 src/direct_matching.py
 src/test.py
+src/stability.py
+src/old_main.py
+results/
+src/*.json
+src/__pycache__/
+figures/
+src/*.png
+
+src/lunar_landing_test.py
+src/lunar_landing_expert.py
+src/episode_sampling.py
+src/create_videos_from_data.py
+src/plot_convergence_from_data.py
+src/old_code/
+src/bounded_lp_vs_dim_linear_quartic.py
+src/cartpole.py
+src/moment_matching_polished.py
+src/plot_all_converged_costs.py
+src/plot_costs_from_json.py
+src/plot_costs_vs_convergence.py
+src/visualization.py
+
+# Embedded git repository (separate project)
+ADP_LP/
