@@ -1,5 +1,5 @@
 import numpy as np
-from dynamical_systems import dlqr
+from dynamical_systems_polished import dlqr
 import matplotlib.pyplot as plt
 import os
 from config import (
@@ -12,23 +12,9 @@ from config import (
     RHO_CART_POLE,
     U_BOUNDS,
     DEGREE,
-    DT_SINGLE_PENDULUM,
-    C_SINGLE_PENDULUM,
-    RHO_SINGLE_PENDULUM,
-    U_BOUNDS_SINGLE_PENDULUM,
-    SCALAR_CUBIC_OVERFLOW_THRESHOLD,
-    DT_SCALAR_CUBIC,
-    C_SCALAR_CUBIC,
-    RHO_SCALAR_CUBIC,
-    U_BOUNDS_SCALAR_CUBIC,
 )
 
-# Try to import PolynomialStateFeatureScaler to check if it's being used
-try:
-    from feature_scaling import PolynomialStateFeatureScaler
-except ImportError:
-    PolynomialStateFeatureScaler = None
-
+from polynomial_features import FilteredPolynomialFeatures, StateOnlyPolynomialFeatures
 class PolicyExtractor:
     """
     Policy extractor with better numerical stability and optimization
@@ -60,36 +46,24 @@ class PolicyExtractor:
             default_state_units = ['m', 'm/s', 'rad', 'rad/s']
             control_label = 'Control Torque (N·m)'
             default_state_limits = [(-5.0, 5.0), (-5.0, 5.0), (-2.0*np.pi, 2.0*np.pi), (-10.0, 10.0)]
-        elif self.system_type == "single_pendulum":
-            default_dt = DT_SINGLE_PENDULUM
-            default_C = C_SINGLE_PENDULUM
-            default_rho = RHO_SINGLE_PENDULUM
-            default_u_bounds = U_BOUNDS_SINGLE_PENDULUM
-            default_state_names = ['Angle (rad)', 'Angular Velocity (rad/s)']
-            default_state_units = ['rad', 'rad/s']
-            control_label = 'Control Torque (N·m)'
-            default_state_limits = [(-np.pi, np.pi), (-10.0, 10.0)]
-        elif self.system_type == "mountain_car":
-            from config import DT_MOUNTAIN_CAR, C_MOUNTAIN_CAR, RHO_MOUNTAIN_CAR, U_BOUNDS_MOUNTAIN_CAR
-            default_dt = DT_MOUNTAIN_CAR
-            default_C = C_MOUNTAIN_CAR
-            default_rho = RHO_MOUNTAIN_CAR
-            default_u_bounds = U_BOUNDS_MOUNTAIN_CAR
-            default_state_names = ['Position (m)', 'Velocity (m/s)']
-            default_state_units = ['m', 'm/s']
-            control_label = 'Control Force (N)'
-            default_state_limits = [(-1.2, 0.6), (-0.07, 0.07)]
-        elif self.system_type == "scalar_cubic":
-            default_dt = DT_SCALAR_CUBIC
-            default_C = C_SCALAR_CUBIC
-            default_rho = RHO_SCALAR_CUBIC
-            default_u_bounds = U_BOUNDS_SCALAR_CUBIC
-            default_state_names = ['State x']
-            default_state_units = ['']
-            control_label = 'Control u'
-            default_state_limits = [(-10.0, 10.0)]
+        elif self.system_type == "pointmass2d":
+            default_dt = DT
+            # Default C will be set dynamically based on actual state dimension when system is created
+            # For now, use a placeholder that will be overridden by extractor_kwargs
+            default_C = None  # Will be set from extractor_kwargs
+            default_rho = 1.0
+            default_u_bounds = (-8.0, 8.0)  # Force bounds
+            # Default state names/units/limits for 4D (2D point mass) - will be generated dynamically for other dimensions
+            default_state_names = ['Position x (m)', 'Position y (m)', 'Velocity x (m/s)', 'Velocity y (m/s)']
+            default_state_units = ['m', 'm', 'm/s', 'm/s']
+            control_label = 'Force (N)'
+            # Use test bounds from config to match actual test state sampling range
+            from config import P_BOUNDS_POINT_MASS_TEST, V_BOUNDS_POINT_MASS_TEST
+            # Default limits for 4D - will be generated dynamically for other dimensions
+            default_state_limits = [P_BOUNDS_POINT_MASS_TEST, P_BOUNDS_POINT_MASS_TEST, 
+                                   V_BOUNDS_POINT_MASS_TEST, V_BOUNDS_POINT_MASS_TEST]
         else:
-            raise ValueError(f"Unsupported system_type '{system_type}'")
+            raise ValueError(f"Unsupported system_type '{system_type}'. Supported: 'cartpole', 'pointmass2d'.")
         
         # Store physical parameters when available
         self.M_c = M_c if M_c is not None else (M_C if self.system_type == "cartpole" else None)
@@ -127,18 +101,34 @@ class PolicyExtractor:
             names = self._default_state_names
             units = self._default_state_units
             limits = self._default_state_limits
-        elif self.system_type == "single_pendulum" and n_states == 2:
-            names = self._default_state_names
-            units = self._default_state_units
-            limits = self._default_state_limits
-        elif self.system_type == "scalar_cubic" and n_states == 1:
-            names = self._default_state_names
-            units = self._default_state_units
-            limits = self._default_state_limits
-        elif self.system_type == "mountain_car" and n_states == 2:
-            names = self._default_state_names
-            units = self._default_state_units
-            limits = self._default_state_limits
+        elif self.system_type == "pointmass2d":
+            # For point mass: state is [p, v] where p,v are n-dimensional
+            # So n_states = 2n, meaning n = n_states / 2
+            if n_states % 2 != 0:
+                # Fallback for invalid dimensions
+                names = [f"State {i+1}" for i in range(n_states)]
+                units = ['units'] * n_states
+                limits = [None] * n_states
+            else:
+                n = n_states // 2
+                # Generate names: Position x, Position y, ..., Velocity x, Velocity y, ...
+                names = []
+                units = []
+                limits = []
+                from config import P_BOUNDS_POINT_MASS_TEST, V_BOUNDS_POINT_MASS_TEST
+                # Position components
+                position_labels = ['x', 'y', 'z'] + [f'{i}' for i in range(4, n+1)]
+                for i in range(n):
+                    label = position_labels[i] if i < len(position_labels) else f'{i+1}'
+                    names.append(f'Position {label} (m)')
+                    units.append('m')
+                    limits.append(P_BOUNDS_POINT_MASS_TEST)
+                # Velocity components
+                for i in range(n):
+                    label = position_labels[i] if i < len(position_labels) else f'{i+1}'
+                    names.append(f'Velocity {label} (m/s)')
+                    units.append('m/s')
+                    limits.append(V_BOUNDS_POINT_MASS_TEST)
         else:
             names = [f"State {i+1}" for i in range(n_states)]
             units = ['units'] * n_states
@@ -151,7 +141,7 @@ class PolicyExtractor:
         
         Supports:
         - LQR systems (dlqr class) with optimal_solution method
-        - Nonlinear systems with linearized_system method (e.g., cartpole, single_pendulum)
+        - Nonlinear systems with linearized_system method (e.g., cartpole)
         
         Returns:
             policy_func: function that takes state and returns control action
@@ -164,7 +154,7 @@ class PolicyExtractor:
             system_type = 'lqr'
         elif hasattr(system, 'linearized_system'):
             # This is a nonlinear system with linearization capability
-            # (e.g., cartpole, single_pendulum)
+            # (e.g., cartpole)
             system_type = 'nonlinear'
         else:
             raise ValueError(f"Unknown system type: {type(system)}")
@@ -185,12 +175,28 @@ class PolicyExtractor:
             if x.ndim == 1:
                 x = x.reshape(1, -1)
             u = -K_lqr @ x.T  # Standard LQR control law: u = -K @ x
-            u_clipped = np.clip(u.T, self.u_bounds[0], self.u_bounds[1])
-            # Ensure we return a scalar for single control systems
-            if u_clipped.size == 1:
-                return float(u_clipped.item())
+            u_clipped = u.T  # Shape: (batch, N_u)
+            
+            # Clip to bounds (handle both scalar and tuple bounds)
+            if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                # Scalar bounds: apply to all dimensions
+                u_clipped = np.clip(u_clipped, self.u_bounds[0], self.u_bounds[1])
             else:
-                return u_clipped
+                # Assume bounds is a list/array of (min, max) for each dimension
+                # For now, if it's a tuple, treat as scalar bounds
+                u_clipped = np.clip(u_clipped, self.u_bounds[0], self.u_bounds[1])
+            
+            # Return format: scalar for single control, array for multi-dimensional
+            if u_clipped.shape[1] == 1:
+                if u_clipped.shape[0] == 1:
+                    return float(u_clipped[0, 0])
+                else:
+                    return u_clipped.flatten()
+            else:
+                if u_clipped.shape[0] == 1:
+                    return u_clipped[0, :]
+                else:
+                    return u_clipped
         
         return lqr_policy, K_lqr, P_lqr
     
@@ -232,20 +238,37 @@ class PolicyExtractor:
         
         return os.path.join(plot_dir, filename)
 
-    def extract_policy_grid_search(self, system, Q_matrix, poly_scaler=None, n_grid_points=100):
+    def extract_policy_grid_search(self, system, Q_matrix, degree=None, dx=None, du=None, n_grid_points=100):
         """
         Extract policy using grid search - serves as baseline for verification
         
         Args:
             system: dynamical system
             Q_matrix: Q-matrix from moment matching
-            poly: polynomial feature transformer
-            scaler: optional feature scaler
+            degree: polynomial feature degree
+            dx: state dimension
+            du: control dimension
             n_grid_points: number of grid points for action search
             
         Returns:
             policy function that takes states and returns optimal actions
         """
+        if degree is None:
+            degree = self.degree
+        if dx is None or du is None:
+            # Infer from system or Q_matrix
+            if hasattr(system, 'N_x') and hasattr(system, 'N_u'):
+                dx = system.N_x
+                du = system.N_u
+            else:
+                raise ValueError("dx and du must be provided or system must have N_x and N_u attributes")
+        
+        # Create polynomial feature transformer
+        poly = StateOnlyPolynomialFeatures(degree=degree, include_bias=False, dx=dx, du=du)
+        # Fit on dummy data to initialize (will be used for transform only)
+        dummy_data = np.zeros((1, dx + du))
+        poly.fit(dummy_data)
+        
         def policy_grid_search(x):
             x = np.atleast_2d(x)
             n = x.shape[0]
@@ -257,9 +280,9 @@ class PolicyExtractor:
                 def q_function(u_val):
                     """Evaluate Q-function for given action"""
                     try:
-                        # Create state-action pair and let poly_scaler handle all transformations
-                        state_action = np.concatenate([state, [u_val]])
-                        phi = poly_scaler.transform(state_action.reshape(1, -1))
+                        # Create state-action pair
+                        state_action = np.concatenate([state, [u_val]]).reshape(1, -1)
+                        phi = poly.transform(state_action)
                         
                         # Evaluate Q-function
                         q_value = phi @ Q_matrix @ phi.T
@@ -292,11 +315,27 @@ class PolicyExtractor:
 
         return policy_grid_search
 
-    def extract_policy_scipy_optimization(self, system, Q_matrix, poly_scaler=None):
+    def extract_policy_scipy_optimization(self, system, Q_matrix, degree=None, dx=None, du=None):
         """
         Extract policy using scipy optimization - more efficient than grid search
         """
         from scipy.optimize import minimize_scalar, minimize
+        
+        if degree is None:
+            degree = self.degree
+        if dx is None or du is None:
+            # Infer from system or Q_matrix
+            if hasattr(system, 'N_x') and hasattr(system, 'N_u'):
+                dx = system.N_x
+                du = system.N_u
+            else:
+                raise ValueError("dx and du must be provided or system must have N_x and N_u attributes")
+        
+        # Create polynomial feature transformer
+        poly = StateOnlyPolynomialFeatures(degree=degree, include_bias=False, dx=dx, du=du)
+        # Fit on dummy data to initialize (will be used for transform only)
+        dummy_data = np.zeros((1, dx + du))
+        poly.fit(dummy_data)
         
         def policy_scipy_optimization(x):
             x = np.atleast_2d(x)
@@ -309,9 +348,9 @@ class PolicyExtractor:
                 def q_function(u_val):
                     """Evaluate Q-function for given action"""
                     try:
-                        # Create state-action pair and let poly_scaler handle all transformations
-                        state_action = np.concatenate([state, [u_val]])
-                        phi = poly_scaler.transform(state_action.reshape(1, -1))
+                        # Create state-action pair
+                        state_action = np.concatenate([state, [u_val]]).reshape(1, -1)
+                        phi = poly.transform(state_action)
                         
                         # Evaluate Q-function
                         q_value = phi @ Q_matrix @ phi.T
@@ -358,41 +397,62 @@ class PolicyExtractor:
 
         return policy_scipy_optimization
     
-    def extract_moment_matching_policy_analytical(self, system, Q_matrix, poly_scaler):
+    def extract_moment_matching_policy_analytical(self, system, Q_matrix, degree=None, dx=None, du=None, debug=False, debug_max_print=10):
         """
         Analytical policy extraction using gradient-based approach
         
         This method computes the optimal action analytically when possible,
         falling back to numerical optimization when needed.
-        """
-        # Check if using PolynomialStateFeatureScaler (features: [poly_features(x, degree=2), u])
-        if PolynomialStateFeatureScaler is not None and isinstance(poly_scaler, PolynomialStateFeatureScaler):
-            return self._extract_policy_state_poly_scaler(Q_matrix, poly_scaler)
         
-        # Standard case: use poly.powers_ structure
-        n_phi = poly_scaler.poly.n_output_features_
+        Args:
+            system: dynamical system
+            Q_matrix: Q-matrix from moment matching
+            degree: polynomial feature degree
+            dx: state dimension
+            du: control dimension
+        """
+        if degree is None:
+            degree = self.degree
+        if dx is None or du is None:
+            # Infer from system
+            if hasattr(system, 'N_x') and hasattr(system, 'N_u'):
+                dx = system.N_x
+                du = system.N_u
+            else:
+                raise ValueError("dx and du must be provided or system must have N_x and N_u attributes")
+        
+        # Create polynomial feature transformer (always excludes u^2 terms)
+        poly = StateOnlyPolynomialFeatures(degree=degree, include_bias=False, dx=dx, du=du)
+        # Fit on dummy data to initialize (will be used for transform only)
+        dummy_data = np.zeros((1, dx + du))
+        poly.fit(dummy_data)
+        
+        # Check if we can use the analytical solution for StateOnlyPolynomialFeatures
+        # This works for any degree and any du, as long as features are [poly(x), u]
+        use_stateonly_analytical = isinstance(poly, StateOnlyPolynomialFeatures)
+        
+        n_phi = poly.n_output_features_
         assert Q_matrix.shape == (n_phi, n_phi), (
             f"Q_matrix shape {Q_matrix.shape} != ({n_phi},{n_phi})"
         )
         
+        # Diagnostics state (used only if debug=True)
+        debug_ctx = {
+            "enabled": bool(debug),
+            "max_print": int(debug_max_print) if debug_max_print is not None else 0,
+            "printed": 0,
+            "n_calls": 0,
+            "n_clipped": 0,
+        }
+        
         def mm_policy_analytical(x):
             x = np.atleast_2d(x)
             n = x.shape[0]
-            actions = np.empty((n, 1), dtype=float)
+            actions = np.empty((n, du), dtype=float)
+            debug_ctx["n_calls"] += n
 
             for i in range(n):
                 state = x[i]
-                
-                # Apply scaling if available
-                if poly_scaler is not None:
-                    # Use new PolynomialFeatureScaler approach
-                    if hasattr(poly_scaler, 'scaler_x') and poly_scaler.scaler_x is not None:
-                        state_scaled = poly_scaler.scaler_x.transform(state.reshape(1, -1))[0]
-                    else:
-                        # No separate scaling, use state as is
-                        state_scaled = state
-                else:
-                    state_scaled = state
 
                 try:
                     # For polynomial features, we can compute the gradient analytically
@@ -400,76 +460,142 @@ class PolicyExtractor:
                     # where phi(x,u) = [x, u, x^2, xu, u^2, ...]
                     
                     # Try analytical solution first
-                    if self.degree == 1:
-                        # print(f"Solving linear policy analytically for state {i}")
-                        # For linear features: phi = [x1, x2, x3, x4, u]
-                        # Objective: [x, u]^T Q [x, u] = x^T Q_xx x + 2 x^T Q_xu u + u^T Q_uu u
-                        # Optimal u = -Q_uu^{-1} Q_xu^T x
-                        
-                        # For degree 1, features are [x1, x2, x3, x4, u], so Q is (5, 5)
-                        n_states = len(state_scaled)  # Should be 4
-                        Q_xx = Q_matrix[:n_states, :n_states]
-                        Q_ux = Q_matrix[n_states:, :n_states]
-                        Q_xu = Q_matrix[:n_states, n_states:]
-                        Q_uu = Q_matrix[n_states:, n_states:]
-
-                        # For linear features: phi = [x1, x2, x3, x4, u]
-                        # Q-function: phi^T Q phi = x^T Q_xx x + 2x^T Q_xu u + u^T Q_uu u
-                        # Optimal u: ∂/∂u = 0 → 2Q_xu^T x + 2Q_uu u = 0 → u = -Q_uu^{-1} Q_xu^T x
-                        
-                        # Use scaled state with Q-matrix (which was learned on scaled features)
-                        try:
-                            u_opt_scaled = -np.linalg.solve(Q_uu, Q_xu.T @ state_scaled)
-                            u_opt_scaled = float(u_opt_scaled.item())
-                        except np.linalg.LinAlgError:
-                            # Use regularized solve for ill-conditioned matrices
-                            cond_Q_uu = np.linalg.cond(Q_uu)
-                            print(f"Warning: Q_uu condition number {cond_Q_uu:.2e}, using regularized solve")
-                            reg = 1e-6 * np.trace(Q_uu) / Q_uu.shape[0]
-                            u_opt_scaled = -np.linalg.solve(Q_uu + reg * np.eye(Q_uu.shape[0]), Q_xu.T @ state_scaled)
-                            u_opt_scaled = float(u_opt_scaled.item())
-                        
-                        # Transform the scaled action back to original space if needed
-                        if hasattr(poly_scaler, 'scaler_u') and poly_scaler.scaler_u is not None:
-                            u_opt = poly_scaler.scaler_u.inverse_transform(np.array([u_opt_scaled]).reshape(1, -1))[0, 0]
+                    if degree == 1:
+                        # For linear features with StateOnlyPolynomialFeatures: phi = [x1, x2, ..., x_dx, u1, u2, ..., u_du]
+                        # For FilteredPolynomialFeatures: same structure
+                        # Both can use the same analytical solution
+                        if use_stateonly_analytical:
+                            # Use the general StateOnlyPolynomialFeatures analytical solver
+                            u_opt = self._solve_stateonly_polynomial_policy_analytical(
+                                state, Q_matrix, poly, dx, du, debug=debug_ctx["enabled"], debug_ctx=debug_ctx
+                            )
+                            if u_opt is not None and np.isfinite(u_opt).all():
+                                actions[i, :] = u_opt
+                            else:
+                                # Fallback to direct computation
+                                n_poly_features = poly.poly_x.n_output_features_
+                                Q_xu = Q_matrix[:n_poly_features, n_poly_features:]
+                                Q_uu = Q_matrix[n_poly_features:, n_poly_features:]
+                                phi_x = poly.poly_x.transform(state.reshape(1, -1)).flatten()
+                                try:
+                                    u_opt = -np.linalg.solve(Q_uu, Q_xu.T @ phi_x)
+                                    u_opt = np.clip(u_opt, self.u_bounds[0], self.u_bounds[1])
+                                    actions[i, :] = u_opt
+                                except:
+                                    actions[i, :] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
                         else:
-                            u_opt = u_opt_scaled
-                        
-                        u_opt = float(np.clip(u_opt, self.u_bounds[0], self.u_bounds[1]))
-                        actions[i, 0] = u_opt
+                            # For FilteredPolynomialFeatures: features are [x1, x2, ..., x_dx, u1, u2, ..., u_du]
+                            # So Q_xx is [:dx, :dx], Q_xu is [:dx, dx:dx+du], Q_uu is [dx:dx+du, dx:dx+du]
+                            Q_xx = Q_matrix[:dx, :dx]
+                            Q_xu = Q_matrix[:dx, dx:dx+du]
+                            Q_uu = Q_matrix[dx:dx+du, dx:dx+du]
+
+                            # Optimal u: ∂/∂u = 0 → 2Q_xu^T x + 2Q_uu u = 0 → u = -Q_uu^{-1} Q_xu^T x
+                            try:
+                                u_opt = -np.linalg.solve(Q_uu, Q_xu.T @ state)
+                                u_opt = np.asarray(u_opt).reshape(-1)
+                            except np.linalg.LinAlgError:
+                                # Use regularized solve for ill-conditioned matrices
+                                cond_Q_uu = np.linalg.cond(Q_uu)
+                                print(f"Warning: Q_uu condition number {cond_Q_uu:.2e}, using regularized solve")
+                                reg = 1e-6 * np.trace(Q_uu) / Q_uu.shape[0]
+                                u_opt = -np.linalg.solve(Q_uu + reg * np.eye(Q_uu.shape[0]), Q_xu.T @ state)
+                                u_opt = np.asarray(u_opt).reshape(-1)
+                            
+                            # Clip to bounds (handle both scalar and tuple bounds)
+                            if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                                # Scalar bounds: apply to all dimensions
+                                u_opt = np.clip(u_opt, self.u_bounds[0], self.u_bounds[1])
+                            else:
+                                # Assume bounds is a list/array of (min, max) for each dimension
+                                # For now, if it's a tuple, treat as scalar bounds
+                                u_opt = np.clip(u_opt, self.u_bounds[0], self.u_bounds[1])
+                            
+                            actions[i, :] = u_opt
                         continue
                     
-                    elif self.degree == 2:
-                        # print(f"Solving quadratic policy analytically for state {i}")
+                    elif degree == 2:
                         # For degree 2 polynomial features: phi = [x, u, x^2, xu, u^2, ...]
-                        # The objective is quartic in u: a4*u^4 + a3*u^3 + a2*u^2 + a1*u + a0
-                        # Find critical points by solving the derivative
-                        
-                        u_opt = self._solve_quadratic_policy_analytical(state_scaled, Q_matrix, poly_scaler)
-                        # print(f"u_opt: {u_opt}")
-                        if u_opt is not None and np.isfinite(u_opt):
-                            actions[i, 0] = u_opt
+                        # For multi-dimensional control, we need to optimize over vector u
+                        if use_stateonly_analytical:
+                            # Use analytical solution for StateOnlyPolynomialFeatures (works for any du)
+                            u_opt = self._solve_stateonly_polynomial_policy_analytical(
+                                state, Q_matrix, poly, dx, du, debug=debug_ctx["enabled"], debug_ctx=debug_ctx
+                            )
+                            if u_opt is not None and np.isfinite(u_opt).all():
+                                actions[i, :] = u_opt
+                            else:
+                                # Fallback to numerical optimization
+                                u_opt = self._solve_multidimensional_policy(state, Q_matrix, poly, dx, du)
+                                if u_opt is not None and np.isfinite(u_opt).all():
+                                    actions[i, :] = u_opt
+                                else:
+                                    # Fallback to center of action bounds
+                                    if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                                        actions[i, :] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                                    else:
+                                        actions[i, :] = 0.0
+                        elif du == 1:
+                            # Scalar control: use analytical solution for FilteredPolynomialFeatures
+                            u_opt = self._solve_quadratic_policy_analytical(state, Q_matrix, poly, dx, du)
+                            if u_opt is not None and np.isfinite(u_opt):
+                                actions[i, 0] = u_opt
+                            else:
+                                # Fallback to center of action bounds
+                                print(f"Fallback to center of action bounds")
+                                actions[i, 0] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
                         else:
-                            # Fallback to center of action bounds if analytical solution fails
-                            print(f"Fallback to center of action bounds")
-                            actions[i, 0] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                            # Multi-dimensional control: use numerical optimization
+                            u_opt = self._solve_multidimensional_policy(state, Q_matrix, poly, dx, du)
+                            if u_opt is not None and np.isfinite(u_opt).all():
+                                actions[i, :] = u_opt
+                            else:
+                                # Fallback to center of action bounds
+                                print(f"Fallback to center of action bounds")
+                                if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                                    actions[i, :] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                                else:
+                                    actions[i, :] = 0.0
                         continue
 
-                    elif self.degree > 2:
-                        u_opt = self.extract_policy_scipy_optimization(system, Q_matrix, poly_scaler=poly_scaler)(state_scaled)
-                        if u_opt is not None and np.isfinite(u_opt):
-                            # u_clipped = float(np.clip(u_opt, self.u_bounds[0], self.u_bounds[1]))
-                            actions[i, 0] = u_opt
-                            # if abs(u_opt - u_clipped) > 1e-6:
-                            #     print(f"Warning: Control action clipped from {u_opt:.4f} to {u_clipped:.4f} for state {i}")
+                    elif degree > 2:
+                        # For higher degrees, try analytical solution if using StateOnlyPolynomialFeatures
+                        if use_stateonly_analytical:
+                            u_opt = self._solve_stateonly_polynomial_policy_analytical(
+                                state, Q_matrix, poly, dx, du, debug=debug_ctx["enabled"], debug_ctx=debug_ctx
+                            )
+                            if u_opt is not None and np.isfinite(u_opt).all():
+                                actions[i, :] = u_opt
+                            else:
+                                # Fallback to numerical optimization
+                                u_opt = self._solve_multidimensional_policy(state, Q_matrix, poly, dx, du)
+                                if u_opt is not None and np.isfinite(u_opt).all():
+                                    actions[i, :] = u_opt
+                                else:
+                                    # Fallback to center of action bounds
+                                    if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                                        actions[i, :] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                                    else:
+                                        actions[i, :] = 0.0
                         else:
-                            # Fallback to center of action bounds if analytical solution fails
-                            print(f"Fallback to center of action bounds")
-                            actions[i, 0] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                            # For higher degrees, use numerical optimization
+                            u_opt = self._solve_multidimensional_policy(state, Q_matrix, poly, dx, du)
+                            if u_opt is not None and np.isfinite(u_opt).all():
+                                actions[i, :] = u_opt
+                            else:
+                                # Fallback to center of action bounds
+                                print(f"Fallback to center of action bounds")
+                                if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                                    actions[i, :] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                                else:
+                                    actions[i, :] = 0.0
                         continue
                     
                     print(f"Analytical optimization failed for state {i}, using fallback")
-                    actions[i, 0] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                    if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                        actions[i, :] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
+                    else:
+                        actions[i, :] = 0.0
                         
                 except Exception as e:
                     print(f"Exception in analytical optimization for state {i}: {e}")
@@ -477,115 +603,228 @@ class PolicyExtractor:
                     traceback.print_exc()
                     actions[i, 0] = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
 
-            # For single control systems, return scalars for single states, 1D arrays for multiple states
-            if actions.shape[1] == 1:
+            # Return format: scalar for single state + scalar control, array otherwise
+            if du == 1:
                 if len(actions) == 1:
-                    # Single state - return scalar
-                    return float(actions[0])
+                    # Single state, scalar control - return scalar
+                    return float(actions[0, 0])
                 else:
-                    # Multiple states - return 1D array
+                    # Multiple states, scalar control - return 1D array
                     return actions.flatten()
             else:
-                return actions
+                # Multi-dimensional control
+                if len(actions) == 1:
+                    # Single state, vector control - return 1D array
+                    return actions[0, :]
+                else:
+                    # Multiple states, vector control - return 2D array
+                    return actions
 
         return mm_policy_analytical
     
-    def _extract_policy_state_poly_scaler(self, Q_matrix, poly_scaler):
+    
+    def _solve_multidimensional_policy(self, state, Q_matrix, poly, dx, du):
         """
-        Extract policy for PolynomialStateFeatureScaler.
-        
-        Features are [poly_features(x, degree=2), u] where u only appears linearly.
-        The objective is quadratic in u: a2*u^2 + a1*u + a0
+        Solve for optimal multi-dimensional control u using numerical optimization.
         
         Args:
-            Q_matrix: Q-matrix from moment matching, shape (n_poly_features + du, n_poly_features + du)
-            poly_scaler: PolynomialStateFeatureScaler instance
+            state: state vector
+            Q_matrix: Q-matrix from moment matching
+            poly: FilteredPolynomialFeatures transformer
+            dx: state dimension
+            du: control dimension
             
         Returns:
-            Policy function that takes state x and returns optimal action u
+            optimal u vector or None if optimization fails
         """
-        n_poly_features = poly_scaler.poly_x.n_output_features_
-        du = poly_scaler.du
-        dx = poly_scaler.dx
+        from scipy.optimize import minimize
         
-        assert Q_matrix.shape == (n_poly_features + du, n_poly_features + du), (
-            f"Q_matrix shape {Q_matrix.shape} != ({n_poly_features + du},{n_poly_features + du})"
-        )
+        # Get bounds for optimization
+        if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+            # Scalar bounds: apply to all dimensions
+            bounds = [(self.u_bounds[0], self.u_bounds[1])] * du
+        else:
+            # Assume bounds is a list/array of (min, max) for each dimension
+            # For now, if it's a tuple, treat as scalar bounds
+            bounds = [(self.u_bounds[0], self.u_bounds[1])] * du
         
-        # Partition Q matrix
-        Q_xx = Q_matrix[:n_poly_features, :n_poly_features]  # State feature interactions
-        Q_xu = Q_matrix[:n_poly_features, n_poly_features:]  # State-u interactions
-        Q_ux = Q_matrix[n_poly_features:, :n_poly_features]  # u-state interactions (transpose of Q_xu)
-        Q_uu = Q_matrix[n_poly_features:, n_poly_features:]  # u-u interactions
+        def q_function(u_vec):
+            """Evaluate Q-function for given control vector"""
+            try:
+                u_vec = np.asarray(u_vec).reshape(-1)
+                if u_vec.size != du:
+                    return np.inf
+                # Create state-action pair
+                state_action = np.concatenate([state, u_vec]).reshape(1, -1)
+                phi = poly.transform(state_action)
+                
+                # Evaluate Q-function
+                q_value = phi @ Q_matrix @ phi.T
+                return float(q_value[0, 0])
+            except:
+                return np.inf
         
-        def mm_policy_analytical(x):
-            x = np.atleast_2d(x)
-            n = x.shape[0]
-            actions = np.empty((n, du), dtype=float)
+        # Initial guess: center of bounds
+        u0 = np.array([0.5 * (b[0] + b[1]) for b in bounds])
+        
+        try:
+            result = minimize(
+                q_function,
+                u0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 1000, 'ftol': 1e-8}
+            )
             
-            for i in range(n):
-                state = x[i]
-                
-                # Apply scaling if available
-                if poly_scaler.scaler_x is not None:
-                    state_scaled = poly_scaler.scaler_x.transform(state.reshape(1, -1))[0]
-                else:
-                    state_scaled = state
-                
-                # Generate polynomial features from state
-                phi_x = poly_scaler.poly_x.transform(state_scaled.reshape(1, -1))[0]
-                
-                # Compute quadratic coefficients for u
-                # Objective: phi^T Q phi = phi_x^T Q_xx phi_x + 2*phi_x^T Q_xu u + u^T Q_uu u
-                # For scalar u (du=1): a2*u^2 + a1*u + a0
-                if du == 1:
-                    a2 = float(Q_uu[0, 0])  # Scalar
-                    a1 = float(2 * phi_x @ Q_xu[:, 0])  # Scalar
-                    a0 = float(phi_x @ Q_xx @ phi_x)  # Scalar, independent of u
-                    
-                    # Optimal u: derivative = 2*a2*u + a1 = 0 → u = -a1/(2*a2)
-                    if abs(a2) > 1e-12:
-                        u_opt = -a1 / (2 * a2)
-                        # Check if it's a minimum (a2 > 0) or maximum (a2 < 0)
-                        if a2 < 0:
-                            # Maximum, so check boundaries
-                            u_opt = self.u_bounds[0] if abs(u_opt - self.u_bounds[0]) < abs(u_opt - self.u_bounds[1]) else self.u_bounds[1]
-                        u_opt = float(np.clip(u_opt, self.u_bounds[0], self.u_bounds[1]))
-                    else:
-                        # Degenerate case: linear in u
-                        if abs(a1) > 1e-12:
-                            # Linear: minimize a1*u → choose boundary based on sign of a1
-                            u_opt = self.u_bounds[0] if a1 > 0 else self.u_bounds[1]
-                        else:
-                            # Constant in u, choose center
-                            u_opt = 0.5 * (self.u_bounds[0] + self.u_bounds[1])
-                    actions[i, 0] = u_opt
-                else:
-                    # Multi-dimensional control: solve Q_uu u = -Q_ux phi_x
-                    # This is a linear system: u = -Q_uu^{-1} Q_ux phi_x
-                    try:
-                        u_opt = -np.linalg.solve(Q_uu, Q_ux @ phi_x)
-                        u_opt = np.clip(u_opt, self.u_bounds[0], self.u_bounds[1])
-                        actions[i, :] = u_opt
-                    except np.linalg.LinAlgError:
-                        # Use regularized solve for ill-conditioned matrices
-                        reg = 1e-6 * np.trace(Q_uu) / Q_uu.shape[0]
-                        u_opt = -np.linalg.solve(Q_uu + reg * np.eye(Q_uu.shape[0]), Q_ux @ phi_x)
-                        u_opt = np.clip(u_opt, self.u_bounds[0], self.u_bounds[1])
-                        actions[i, :] = u_opt
-            
-            # Return format: scalar for single state, 1D array for multiple states
-            if actions.shape[1] == 1:
-                if len(actions) == 1:
-                    return float(actions[0, 0])
-                else:
-                    return actions[:, 0]
+            if result.success:
+                return np.asarray(result.x).reshape(-1)
             else:
-                return actions
+                # Try with different initial guess or method
+                result = minimize(
+                    q_function,
+                    u0,
+                    method='SLSQP',
+                    bounds=bounds,
+                    options={'maxiter': 1000, 'ftol': 1e-8}
+                )
+                if result.success:
+                    return np.asarray(result.x).reshape(-1)
+        except:
+            pass
         
-        return mm_policy_analytical
+        # Fallback: grid search over a coarse grid
+        try:
+            n_grid = 10
+            if du == 2:
+                # 2D grid search
+                u1_candidates = np.linspace(bounds[0][0], bounds[0][1], n_grid)
+                u2_candidates = np.linspace(bounds[1][0], bounds[1][1], n_grid)
+                best_val = np.inf
+                best_u = None
+                for u1 in u1_candidates:
+                    for u2 in u2_candidates:
+                        val = q_function([u1, u2])
+                        if val < best_val:
+                            best_val = val
+                            best_u = np.array([u1, u2])
+                return best_u
+            else:
+                # For higher dimensions, use random search
+                best_val = np.inf
+                best_u = None
+                for _ in range(100):
+                    u_candidate = np.array([np.random.uniform(b[0], b[1]) for b in bounds])
+                    val = q_function(u_candidate)
+                    if val < best_val:
+                        best_val = val
+                        best_u = u_candidate
+                return best_u
+        except:
+            return None
     
-    def _solve_quadratic_policy_analytical(self, state, Q_matrix, poly_scaler=None):
+    def _solve_stateonly_polynomial_policy_analytical(self, state, Q_matrix, poly, dx, du, debug=False, debug_ctx=None):
+        """
+        Solve for optimal multi-dimensional control u analytically for StateOnlyPolynomialFeatures.
+        
+        This method exploits the structure where φ(x,u) = [φ_x(x), u], where φ_x(x) are
+        polynomial features of x only, and u is appended unchanged.
+        
+        The Q-function is: Q(x,u) = φ(x,u)ᵀ Q φ(x,u)
+        
+        Partitioning Q into blocks:
+        - Q_xx: state features × state features
+        - Q_xu: state features × control features  
+        - Q_ux: control features × state features (Q_xuᵀ)
+        - Q_uu: control features × control features
+        
+        Then: Q(x,u) = φ_x(x)ᵀ Q_xx φ_x(x) + 2 φ_x(x)ᵀ Q_xu u + uᵀ Q_uu u
+        
+        Taking gradient w.r.t. u and setting to zero:
+        ∇_u Q(x,u) = 2 Q_xuᵀ φ_x(x) + 2 Q_uu u = 0
+        → u* = -Q_uu^{-1} Q_xuᵀ φ_x(x)
+        
+        Args:
+            state: state vector of shape (dx,)
+            Q_matrix: Q-matrix from moment matching, shape (n_poly_features + du, n_poly_features + du)
+            poly: StateOnlyPolynomialFeatures transformer
+            dx: state dimension
+            du: control dimension
+            
+        Returns:
+            optimal u vector of shape (du,) or None if solution fails
+        """
+        x = np.asarray(state).reshape(-1)
+        
+        # Get number of polynomial features for states
+        n_poly_features = poly.poly_x.n_output_features_
+        
+        # Partition Q-matrix into blocks
+        # Q = [[Q_xx, Q_xu], [Q_ux, Q_uu]]
+        Q_xx = Q_matrix[:n_poly_features, :n_poly_features]
+        Q_xu = Q_matrix[:n_poly_features, n_poly_features:]
+        Q_ux = Q_matrix[n_poly_features:, :n_poly_features]  # Should be Q_xu.T
+        Q_uu = Q_matrix[n_poly_features:, n_poly_features:]
+        
+        # Compute polynomial features of state only
+        phi_x = poly.poly_x.transform(x.reshape(1, -1))  # Shape: (1, n_poly_features)
+        phi_x = phi_x.flatten()  # Shape: (n_poly_features,)
+        
+        # Analytical solution: u* = -Q_uu^{-1} Q_xu^T φ_x(x)
+        try:
+            # Compute Q_xu^T φ_x(x)
+            Q_xu_T_phi_x = Q_xu.T @ phi_x  # Shape: (du,)
+            
+            # Solve Q_uu u = -Q_xu^T φ_x(x)
+            # Check condition number for numerical stability
+            cond_Q_uu = np.linalg.cond(Q_uu)
+            used_reg = False
+            if cond_Q_uu > 1e12:
+                # Use regularized solve for ill-conditioned matrices
+                reg = 1e-6 * np.trace(Q_uu) / Q_uu.shape[0]
+                used_reg = True
+                u_opt = -np.linalg.solve(Q_uu + reg * np.eye(Q_uu.shape[0]), Q_xu_T_phi_x)
+            else:
+                u_opt = -np.linalg.solve(Q_uu, Q_xu_T_phi_x)
+            
+            u_free = np.asarray(u_opt).reshape(-1)
+            
+            # Clip to bounds
+            if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                u_clipped = np.clip(u_free, self.u_bounds[0], self.u_bounds[1])
+            else:
+                # Assume bounds is a list/array of (min, max) for each dimension
+                u_clipped = np.clip(u_free, self.u_bounds[0], self.u_bounds[1])
+            
+            # Diagnostics (print only first few times to avoid spam)
+            if debug and debug_ctx is not None:
+                debug_ctx["n_clipped"] += int(not np.allclose(u_free, u_clipped, atol=1e-10, rtol=1e-10))
+                if debug_ctx["printed"] < debug_ctx["max_print"]:
+                    try:
+                        eigs = np.linalg.eigvalsh(Q_uu)
+                        eig_min = float(np.min(eigs))
+                        eig_max = float(np.max(eigs))
+                    except Exception:
+                        eig_min, eig_max = float("nan"), float("nan")
+                    print(
+                        "[MM debug][StateOnly analytic] "
+                        f"state={np.asarray(state).reshape(-1)} | "
+                        f"||phi_x||={np.linalg.norm(phi_x):.3e} | "
+                        f"rhs=Q_xu^T phi_x={Q_xu_T_phi_x} | "
+                        f"cond(Q_uu)={cond_Q_uu:.3e} | eig(Q_uu)∈[{eig_min:.3e},{eig_max:.3e}] | "
+                        f"used_reg={used_reg} | "
+                        f"u_free={u_free} -> u_clipped={u_clipped} | "
+                        f"clipped={not np.allclose(u_free, u_clipped, atol=1e-10, rtol=1e-10)} | "
+                        f"clip_rate_so_far={debug_ctx['n_clipped']}/{max(1, debug_ctx['n_calls'])}"
+                    )
+                    debug_ctx["printed"] += 1
+            
+            return u_clipped
+            
+        except (np.linalg.LinAlgError, ValueError) as e:
+            # If solve fails, return None to trigger fallback
+            return None
+    
+    def _solve_quadratic_policy_analytical(self, state, Q_matrix, poly, dx, du):
         """
         Solve for optimal u analytically for degree 2 polynomial features.
         
@@ -602,56 +841,20 @@ class PolicyExtractor:
         4. Find critical points by solving: 4*a₄*u³ + 3*a₃*u² + 2*a₂*u + a₁ = 0
         
         Args:
-            state: state vector (scaled if applicable)
+            state: state vector
             Q_matrix: Q-matrix from moment matching
-            poly: polynomial feature transformer
+            poly: FilteredPolynomialFeatures transformer
+            dx: state dimension
+            du: control dimension
             
         Returns:
             optimal u or None if analytical solution fails
         """
         x = np.asarray(state).reshape(-1)
-        # print(f"x: {x}")
-        
-        # Handle action bounds in scaled space if scaling is used
-        if poly_scaler is not None and hasattr(poly_scaler, 'scaler_u') and poly_scaler.scaler_u is not None:
-            # For multi-dimensional control systems, we need to create full control vectors
-            # with the same bounds for all control dimensions
-            du = poly_scaler.du if hasattr(poly_scaler, 'du') else 1
-            umin_vec = np.full((1, du), self.u_bounds[0])
-            umax_vec = np.full((1, du), self.u_bounds[1])
-            
-            umin_scaled = poly_scaler.scaler_u.transform(umin_vec)
-            umax_scaled = poly_scaler.scaler_u.transform(umax_vec)
-            
-            # For now, use the first control dimension's bounds (assuming all controls have same bounds)
-            umin = float(umin_scaled[0, 0])
-            umax = float(umax_scaled[0, 0])
-            # print(f"umin {umin}, umax {umax}")
-        else:
-            umin, umax = self.u_bounds
+        umin, umax = self.u_bounds
 
-        powers = poly_scaler.poly.powers_            # shape (D, n_inputs): exponents for [x1,...,xn,u1,...,um]
+        powers = poly.powers_  # shape (D, n_inputs): exponents for [x1,...,xn,u1,...,um]
         D = powers.shape[0]
-        n_inputs = powers.shape[1]
-        
-        # Determine state and control dimensions
-        # Try to get dx from poly_scaler, but handle None case
-        if hasattr(poly_scaler, 'dx') and poly_scaler.dx is not None:
-            dx = int(poly_scaler.dx)
-        else:
-            # Infer from state vector length or assume n_inputs - 1 (last dimension is control)
-            if len(x) > 0:
-                dx = len(x)
-            else:
-                dx = n_inputs - 1  # Assume last dimension is control
-        
-        # Try to get du from poly_scaler, but handle None case
-        if hasattr(poly_scaler, 'du') and poly_scaler.du is not None:
-            du = int(poly_scaler.du)
-        else:
-            du = n_inputs - dx  # Infer from difference, default to 1
-            if du <= 0:
-                du = 1  # Fallback to 1 if inference fails
         
         assert Q_matrix.shape == (D, D)
 
@@ -661,10 +864,10 @@ class PolicyExtractor:
         # For multi-dimensional control, we need to handle the control exponents differently
         # For now, assume we're optimizing over the first control variable
         if du == 1:
-            e = powers[:, dx].astype(int)     # exponents of u: 0,1,2 for degree 2
+            e = powers[:, dx].astype(int)  # exponents of u: 0,1,2 for degree 2
         else:
             # For multi-dimensional control, use the first control variable's exponent
-            e = powers[:, dx].astype(int)     # exponents of u1: 0,1,2 for degree 2
+            e = powers[:, dx].astype(int)  # exponents of u1: 0,1,2 for degree 2
             
         for j in range(D):
             # multiply x_i^{p_ji} for i=0..dx-1
@@ -795,22 +998,8 @@ class PolicyExtractor:
                         u_opt_scaled = u
                         break
         
-        # Transform back to original action space if scaling was used
-        if poly_scaler is not None and hasattr(poly_scaler, 'scaler_u') and poly_scaler.scaler_u is not None:
-            # For multi-dimensional control systems, we need to create a full control vector
-            du = poly_scaler.du if hasattr(poly_scaler, 'du') else 1
-            if du == 1:
-                u_opt = poly_scaler.scaler_u.inverse_transform(np.array([u_opt_scaled]).reshape(1,-1))[0]
-            else:
-                # For multi-dimensional control, create a vector with the optimized value for the first control
-                # and zeros for the other controls (assuming we're optimizing over the first control)
-                u_opt_vec = np.zeros(du)
-                u_opt_vec[0] = u_opt_scaled
-                u_opt_full = poly_scaler.scaler_u.inverse_transform(u_opt_vec.reshape(1,-1))[0]
-                u_opt = u_opt_full[0]  # Return only the first control value
-        else:
-            u_opt = u_opt_scaled
-            
+        # No scaling, so u_opt is already in original space
+        u_opt = u_opt_scaled
         return u_opt
     
     
@@ -849,25 +1038,45 @@ class PolicyExtractor:
                 success = False
                 break
             
-            # Ensure u_current is a scalar
-            if hasattr(u_current, '__len__') and len(u_current) > 0:
-                u_current = float(u_current[0])
-            elif hasattr(u_current, 'item'):
-                u_current = u_current.item()
-            else:
-                u_current = float(u_current)
+            # Convert u_current to numpy array and ensure correct shape
+            u_current = np.asarray(u_current).reshape(-1)
+            N_u = system.N_u if hasattr(system, 'N_u') else 1
             
-            inputs.append(u_current)
+            # Handle scalar vs vector control
+            if N_u == 1:
+                # For scalar control, extract scalar value
+                if u_current.size > 0:
+                    u_current_scalar = float(u_current[0])
+                elif hasattr(u_current, 'item'):
+                    u_current_scalar = u_current.item()
+                else:
+                    u_current_scalar = float(u_current)
+                inputs.append(u_current_scalar)
+                u_for_cost = np.array([[u_current_scalar]])
+                u_for_step = u_current_scalar
+            else:
+                # For multi-dimensional control, keep as array
+                if u_current.size != N_u:
+                    # If wrong size, pad or truncate
+                    if u_current.size > N_u:
+                        u_current = u_current[:N_u]
+                    else:
+                        u_padded = np.zeros(N_u)
+                        u_padded[:u_current.size] = u_current
+                        u_current = u_padded
+                inputs.append(u_current.copy())
+                u_for_cost = u_current.reshape(1, -1)
+                u_for_step = u_current
+            
             # Check for invalid control values
-            if not np.isfinite(u_current):
+            if not np.isfinite(u_current).all():
                 print(f"u_current is not finite: {u_current}")
                 success = False
                 break
             
             # Compute cost
             try:
-                cost = system.cost(x_current.reshape(1, -1), 
-                                  np.array([[u_current]]))
+                cost = system.cost(x_current.reshape(1, -1), u_for_cost)
                 # if step % 500 == 0:
                 #     print(f"Step {step} - Cost: {cost}, total cost: {total_cost}")
                 #     # print(f"x_current: {x_current}, u_current: {u_current}")
@@ -885,35 +1094,14 @@ class PolicyExtractor:
             try:
                 # Pass wrap_angles parameter to step() function
                 # wrap_angles=True for MM/ID, wrap_angles=False for LQR
-                x_current = system.step(x_current, u_current, wrap_angles=wrap_angles)
+                x_current = system.step(x_current, u_for_step, wrap_angles=wrap_angles)
                 trajectory.append(x_current.copy())
             except Exception:
                 print(f"Exception in state update")
                 success = False
                 break
             
-            # Early termination for scalar_cubic system to prevent overflow
-            # Check if system is scalar_cubic and state has exceeded overflow threshold
-            # Use isinstance check with the actual class if available, otherwise check class name
-            is_scalar_cubic = False
-            try:
-                from dynamical_systems import scalar_cubic
-                is_scalar_cubic = isinstance(system, scalar_cubic)
-            except ImportError:
-                # Fallback to class name check if import fails
-                is_scalar_cubic = (hasattr(system, '__class__') and 
-                                 system.__class__.__name__ == 'scalar_cubic')
-            
-            if is_scalar_cubic:
-                state_magnitude = np.max(np.abs(x_current)) if hasattr(x_current, '__len__') else abs(x_current)
-                if state_magnitude > SCALAR_CUBIC_OVERFLOW_THRESHOLD:
-                    # State has exceeded overflow threshold - terminate early
-                    print(f"Early termination at step {step}: state magnitude {state_magnitude:.2f} exceeded overflow threshold {SCALAR_CUBIC_OVERFLOW_THRESHOLD}")
-                    success = False
-                    total_cost = np.inf
-                    break
-            
-            # General divergence check for other systems (optional, can be enabled if needed)
+            # General divergence check (optional, can be enabled if needed)
             # if np.any(np.abs(x_current) > 50):
             #     success = False
             #     total_cost = np.inf
@@ -924,7 +1112,7 @@ class PolicyExtractor:
             last_100_states = np.array(trajectory[-100:])
             
             # Check if all last 100 states are sufficiently close to equilibrium (origin)
-            equilibrium_tolerance = 0.05  # Adjust this threshold as needed
+            equilibrium_tolerance = 0.5  # Adjust this threshold as needed
             distances_to_equilibrium = np.linalg.norm(last_100_states, axis=1)
             
             # If any of the last 100 states are too far from equilibrium, mark as unstable
@@ -941,35 +1129,97 @@ class PolicyExtractor:
         Plot control input comparison and save to structured directory
         
         Args:
-            lqr_inputs: LQR control inputs (T,) array
-            mm_inputs: Moment matching control inputs (T,) array
+            lqr_inputs: LQR control inputs - list or array, can be (T,) for scalar or list of arrays for multi-dimensional
+            mm_inputs: Moment matching control inputs - list or array, can be (T,) for scalar or list of arrays for multi-dimensional
             N_samples: Number of samples used in the experiment
             save_path: Optional custom path to save the plot (overrides default structure)
         """
-        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        # Convert inputs to arrays and determine control dimension
+        lqr_inputs_arr = np.asarray(lqr_inputs)
+        mm_inputs_arr = np.asarray(mm_inputs)
+        
+        # Handle list of arrays (multi-dimensional control)
+        if isinstance(lqr_inputs, list) and len(lqr_inputs) > 0:
+            if isinstance(lqr_inputs[0], np.ndarray) and lqr_inputs[0].ndim == 1:
+                # List of 1D arrays - convert to 2D array
+                lqr_inputs_arr = np.array([np.asarray(u).reshape(-1) for u in lqr_inputs])
+            elif not isinstance(lqr_inputs[0], np.ndarray):
+                # List of scalars - convert to 1D array
+                lqr_inputs_arr = np.asarray(lqr_inputs)
+        
+        if isinstance(mm_inputs, list) and len(mm_inputs) > 0:
+            if isinstance(mm_inputs[0], np.ndarray) and mm_inputs[0].ndim == 1:
+                # List of 1D arrays - convert to 2D array
+                mm_inputs_arr = np.array([np.asarray(u).reshape(-1) for u in mm_inputs])
+            elif not isinstance(mm_inputs[0], np.ndarray):
+                # List of scalars - convert to 1D array
+                mm_inputs_arr = np.asarray(mm_inputs)
+        
+        # Determine control dimension
+        if lqr_inputs_arr.ndim == 1:
+            du = 1
+        else:
+            du = lqr_inputs_arr.shape[1] if lqr_inputs_arr.shape[1] > 1 else 1
+        
+        # Create subplots: one for each control dimension
+        if du == 1:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            axes = [ax]
+        else:
+            n_cols = min(2, du)
+            n_rows = int(np.ceil(du / n_cols))
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+            axes = np.atleast_1d(axes).flatten()
         
         # Convert time steps to actual time using DT
-        time_lqr = np.arange(len(lqr_inputs)) * self.dt
-        time_mm = np.arange(len(mm_inputs)) * self.dt
+        time_lqr = np.arange(len(lqr_inputs_arr)) * self.dt
+        time_mm = np.arange(len(mm_inputs_arr)) * self.dt
         
-        # Plot control inputs
-        ax.plot(time_lqr, lqr_inputs, 'b-', label='LQR', linewidth=2, alpha=0.8)
-        ax.plot(time_mm, mm_inputs, 'r-', label='Moment Matching', linewidth=2, alpha=0.8)
+        # Plot each control dimension
+        for dim in range(du):
+            ax = axes[dim] if du > 1 else axes[0]
+            
+            # Extract this dimension's inputs
+            if du == 1:
+                lqr_dim = lqr_inputs_arr if lqr_inputs_arr.ndim == 1 else lqr_inputs_arr[:, 0]
+                mm_dim = mm_inputs_arr if mm_inputs_arr.ndim == 1 else mm_inputs_arr[:, 0]
+            else:
+                lqr_dim = lqr_inputs_arr[:, dim]
+                mm_dim = mm_inputs_arr[:, dim]
+            
+            # Plot control inputs
+            ax.plot(time_lqr, lqr_dim, 'b-', label='LQR', linewidth=2, alpha=0.8)
+            ax.plot(time_mm, mm_dim, 'r-', label='Moment Matching', linewidth=2, alpha=0.8)
+            
+            # Formatting with proper units
+            ax.set_xlabel('Time (s)')
+            if du == 1:
+                ax.set_ylabel(self._control_label)
+                ax.set_title('Control Input Comparison: LQR vs Moment Matching')
+            else:
+                ax.set_ylabel(f'{self._control_label} (dim {dim+1})')
+                ax.set_title(f'Control Input {dim+1}: LQR vs Moment Matching')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            # Add action bounds as horizontal lines
+            if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                ax.axhline(y=self.u_bounds[0], color='gray', linestyle='--', alpha=0.5, 
+                          label=f'Lower Bound ({self.u_bounds[0]})')
+                ax.axhline(y=self.u_bounds[1], color='gray', linestyle='--', alpha=0.5, 
+                          label=f'Upper Bound ({self.u_bounds[1]})')
+            
+            # Styling
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
         
-        # Formatting with proper units
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Control Force (N)')
-        ax.set_title('Control Input Comparison: LQR vs Moment Matching')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        # Hide unused subplots
+        if du > 1:
+            for dim in range(du, len(axes)):
+                axes[dim].set_visible(False)
         
-        # Add action bounds as horizontal lines
-        ax.axhline(y=self.u_bounds[0], color='gray', linestyle='--', alpha=0.5, label=f'Lower Bound ({self.u_bounds[0]} N)')
-        ax.axhline(y=self.u_bounds[1], color='gray', linestyle='--', alpha=0.5, label=f'Upper Bound ({self.u_bounds[1]} N)')
-        
-        # Styling
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+        if du > 1:
+            fig.suptitle('Control Input Comparison: LQR vs Moment Matching', fontsize=14, fontweight='bold')
         
         # Adjust layout
         plt.tight_layout()
@@ -1075,8 +1325,77 @@ class PolicyExtractor:
         # State dimension names with proper units - dynamically generate based on n_states
         state_names, state_units, state_limits = self._get_state_metadata(n_states)
         
-        # Create figure with appropriate number of subplots (n_states + 1 control)
-        n_plots = n_states + 1
+        # Determine control dimension from inputs first
+        du = 1  # Default to scalar control
+        if len(lqr_inputs_list) > 0 and len(lqr_inputs_list[0]) > 0:
+            first_input = lqr_inputs_list[0]
+            if isinstance(first_input, list):
+                if len(first_input) > 0 and isinstance(first_input[0], np.ndarray):
+                    du = len(first_input[0])
+                else:
+                    du = 1
+            elif isinstance(first_input, np.ndarray):
+                if first_input.ndim == 1:
+                    # Check first element to see if it's an array (multi-dimensional)
+                    if len(first_input) > 0:
+                        elem = first_input[0]
+                        if isinstance(elem, np.ndarray) and elem.ndim == 1:
+                            du = len(elem)
+                        else:
+                            du = 1
+                else:
+                    du = first_input.shape[1] if first_input.shape[1] > 1 else 1
+        
+        # Convert inputs to arrays for easier handling
+        def convert_inputs_to_array(input_list):
+            """Convert list of inputs to array format"""
+            if len(input_list) == 0:
+                return None
+            result = []
+            for traj in input_list:
+                # Handle empty arrays/lists
+                if isinstance(traj, np.ndarray) and traj.size == 0:
+                    result.append(np.array([]))
+                    continue
+                if isinstance(traj, list) and len(traj) == 0:
+                    result.append(np.array([]))
+                    continue
+                
+                if isinstance(traj, list):
+                    # List of arrays or scalars
+                    if len(traj) > 0 and isinstance(traj[0], np.ndarray):
+                        # List of arrays - convert to 2D array
+                        result.append(np.array([np.asarray(u).reshape(-1) for u in traj]))
+                    else:
+                        # List of scalars - convert to 1D array
+                        result.append(np.asarray(traj))
+                elif isinstance(traj, np.ndarray):
+                    if traj.ndim == 1:
+                        # Check if elements are arrays (multi-dimensional) or scalars
+                        if len(traj) > 0:
+                            elem = traj[0]
+                            if isinstance(elem, np.ndarray) and elem.ndim == 1:
+                                # Multi-dimensional: convert list of arrays to 2D array
+                                result.append(np.array([np.asarray(u).reshape(-1) for u in traj]))
+                            else:
+                                # Scalar: already 1D array
+                                result.append(traj)
+                        else:
+                            result.append(traj)
+                    else:
+                        # Already 2D array
+                        result.append(traj)
+                else:
+                    # List of scalars
+                    result.append(np.asarray(traj))
+            return result
+        
+        lqr_inputs_arr_list = convert_inputs_to_array(lqr_inputs_list)
+        mm_inputs_arr_list = convert_inputs_to_array(mm_inputs_list)
+        extra_inputs_arr_list = convert_inputs_to_array(extra_inputs_list) if extra_inputs_list is not None else None
+        
+        # Create figure with appropriate number of subplots (n_states + du control dimensions)
+        n_plots = n_states + du
         n_cols = min(3, n_plots)
         n_rows = (n_plots + n_cols - 1) // n_cols
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
@@ -1124,43 +1443,67 @@ class PolicyExtractor:
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
         
-        # Plot control inputs in the last subplot
-        ax = axes[n_states]
-        for j in range(len(lqr_inputs_list)):
-            if (j < len(mm_inputs_list) and 
-                len(lqr_inputs_list[j]) > 0 and len(mm_inputs_list[j]) > 0):
-                # Convert time steps to actual time using DT
-                time_lqr = np.arange(len(lqr_inputs_list[j])) * self.dt
-                time_mm = np.arange(len(mm_inputs_list[j])) * self.dt
-                
-                # Plot LQR inputs
-                ax.plot(time_lqr, lqr_inputs_list[j], 'b-', linewidth=2, alpha=0.8)
-                
-                # Plot MM inputs
-                ax.plot(time_mm, mm_inputs_list[j], 'r-', linewidth=2, alpha=0.8)
-                
-                # Plot extra policy inputs if available
-                if extra_inputs_list is not None and j < len(extra_inputs_list) and len(extra_inputs_list[j]) > 0:
-                    time_extra = np.arange(len(extra_inputs_list[j])) * self.dt
-                    ax.plot(time_extra, extra_inputs_list[j], 'g-', linewidth=2, alpha=0.4)
-        
-        # Add labels for control inputs
-        ax.plot([], [], 'b-', label='LQR', linewidth=2)
-        ax.plot([], [], 'r-', label='Moment Matching', linewidth=2)
-        if extra_inputs_list is not None:
-            ax.plot([], [], 'g-', label=extra_label.capitalize(), linewidth=2)
-        
-        # Add action bounds
-        ax.axhline(y=self.u_bounds[0], color='gray', linestyle='--', alpha=0.5, label=f'Lower Bound ({self.u_bounds[0]} N)')
-        ax.axhline(y=self.u_bounds[1], color='gray', linestyle='--', alpha=0.5, label=f'Upper Bound ({self.u_bounds[1]} N)')
-        
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel(self._control_label)
-        ax.set_title('Control Input Comparison')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+        # Plot control inputs - one subplot per dimension
+        for dim in range(du):
+            ax = axes[n_states + dim]
+            
+            for j in range(len(lqr_inputs_arr_list)):
+                if (j < len(mm_inputs_arr_list) and 
+                    lqr_inputs_arr_list[j] is not None and mm_inputs_arr_list[j] is not None and
+                    len(lqr_inputs_arr_list[j]) > 0 and len(mm_inputs_arr_list[j]) > 0):
+                    # Convert time steps to actual time using DT
+                    time_lqr = np.arange(len(lqr_inputs_arr_list[j])) * self.dt
+                    time_mm = np.arange(len(mm_inputs_arr_list[j])) * self.dt
+                    
+                    # Extract this dimension's inputs
+                    if du == 1:
+                        lqr_dim = lqr_inputs_arr_list[j] if lqr_inputs_arr_list[j].ndim == 1 else lqr_inputs_arr_list[j][:, 0]
+                        mm_dim = mm_inputs_arr_list[j] if mm_inputs_arr_list[j].ndim == 1 else mm_inputs_arr_list[j][:, 0]
+                    else:
+                        lqr_dim = lqr_inputs_arr_list[j][:, dim]
+                        mm_dim = mm_inputs_arr_list[j][:, dim]
+                    
+                    # Plot LQR inputs
+                    ax.plot(time_lqr, lqr_dim, 'b-', linewidth=2, alpha=0.8)
+                    
+                    # Plot MM inputs
+                    ax.plot(time_mm, mm_dim, 'r-', linewidth=2, alpha=0.8)
+                    
+                    # Plot extra policy inputs if available
+                    if extra_inputs_arr_list is not None and j < len(extra_inputs_arr_list) and extra_inputs_arr_list[j] is not None:
+                        if len(extra_inputs_arr_list[j]) > 0:
+                            time_extra = np.arange(len(extra_inputs_arr_list[j])) * self.dt
+                            if du == 1:
+                                extra_dim = extra_inputs_arr_list[j] if extra_inputs_arr_list[j].ndim == 1 else extra_inputs_arr_list[j][:, 0]
+                            else:
+                                extra_dim = extra_inputs_arr_list[j][:, dim]
+                            ax.plot(time_extra, extra_dim, 'g-', linewidth=2, alpha=0.4)
+            
+            # Add labels for control inputs
+            if dim == 0:
+                ax.plot([], [], 'b-', label='LQR', linewidth=2)
+                ax.plot([], [], 'r-', label='Moment Matching', linewidth=2)
+                if extra_inputs_arr_list is not None:
+                    ax.plot([], [], 'g-', label=extra_label.capitalize(), linewidth=2)
+            
+            # Add action bounds
+            if isinstance(self.u_bounds, tuple) and len(self.u_bounds) == 2:
+                ax.axhline(y=self.u_bounds[0], color='gray', linestyle='--', alpha=0.5, 
+                          label=f'Lower Bound ({self.u_bounds[0]})' if dim == 0 else '')
+                ax.axhline(y=self.u_bounds[1], color='gray', linestyle='--', alpha=0.5, 
+                          label=f'Upper Bound ({self.u_bounds[1]})' if dim == 0 else '')
+            
+            ax.set_xlabel('Time (s)')
+            if du == 1:
+                ax.set_ylabel(self._control_label)
+                ax.set_title('Control Input Comparison')
+            else:
+                ax.set_ylabel(f'{self._control_label} (dim {dim+1})')
+                ax.set_title(f'Control Input {dim+1}')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
         
         # Hide any unused subplots
         for i in range(n_plots, len(axes)):
@@ -1371,6 +1714,34 @@ class PolicyExtractor:
             all_convergent_extra_total = None
         
         print(f"Policy comparison: {n_convergent}/{n_tests} starting points had both LQR and MM convergent")
+        
+        # Print which test points failed to converge for each policy
+        lqr_failed_indices = [i for i in range(n_tests) if not lqr_success[i]]
+        mm_failed_indices = [i for i in range(n_tests) if not mm_success[i]]
+        
+        if lqr_failed_indices:
+            print(f"\n--- LQR failed to converge for {len(lqr_failed_indices)} test point(s) ---")
+            for idx in lqr_failed_indices:
+                print(f"  Test point {idx}: {test_states[idx]}")
+        else:
+            print(f"\n--- LQR converged for all {n_tests} test points ---")
+        
+        if mm_failed_indices:
+            print(f"\n--- MM failed to converge for {len(mm_failed_indices)} test point(s) ---")
+            for idx in mm_failed_indices:
+                print(f"  Test point {idx}: {test_states[idx]}")
+        else:
+            print(f"\n--- MM converged for all {n_tests} test points ---")
+        
+        if extra_policy is not None:
+            extra_failed_indices = [i for i in range(n_tests) if not extra_success[i]]
+            if extra_failed_indices:
+                print(f"\n--- {extra_label.upper()} failed to converge for {len(extra_failed_indices)} test point(s) ---")
+                for idx in extra_failed_indices:
+                    print(f"  Test point {idx}: {test_states[idx]}")
+            else:
+                print(f"\n--- {extra_label.upper()} converged for all {n_tests} test points ---")
+        
         print(f"\n--- Costs when both LQR and MM converge ---")
         print(f"LQR mean cost: {convergent_lqr_mean:.4f}")
         print(f"MM mean cost: {convergent_mm_mean:.4f}")
@@ -1542,7 +1913,10 @@ class PolicyExtractor:
                     
                     # Compute action difference
                     if step < len(lqr_inputs) and step < len(mm_inputs):
-                        action_diff = abs(lqr_inputs[step] - mm_inputs[step])
+                        lqr_u = np.asarray(lqr_inputs[step]).reshape(-1)
+                        mm_u = np.asarray(mm_inputs[step]).reshape(-1)
+                        # Compute L2 norm of difference for multi-dimensional control
+                        action_diff = np.linalg.norm(lqr_u - mm_u)
                         action_diffs.append(action_diff)
                     else:
                         action_diffs.append(np.nan)
@@ -1727,19 +2101,47 @@ class PolicyExtractor:
         if n_cases == 0:
             return
         
-        # Create figure with subplots for each divergence case
-        fig = plt.figure(figsize=(16, 5 * n_cases))
-        gs = fig.add_gridspec(n_cases, 3, hspace=0.3, wspace=0.3)
+        # Determine control dimension from first case
+        du = 1
+        if len(divergence_cases) > 0:
+            first_case = divergence_cases[0]
+            lqr_inputs = first_case["lqr_inputs"]
+            if len(lqr_inputs) > 0:
+                first_input = lqr_inputs[0]
+                if isinstance(first_input, np.ndarray) and first_input.ndim == 1:
+                    du = len(first_input)
+                elif isinstance(first_input, list):
+                    if len(first_input) > 0 and isinstance(first_input[0], np.ndarray):
+                        du = len(first_input[0])
+        
+        # Convert inputs to arrays for easier handling
+        def convert_inputs(input_list):
+            """Convert inputs to 2D array if multi-dimensional"""
+            if len(input_list) == 0:
+                return None
+            result = []
+            for u in input_list:
+                u_arr = np.asarray(u).reshape(-1)
+                result.append(u_arr)
+            return np.array(result) if len(result) > 0 else None
+        
+        # Number of columns: 2 (state trajectories, state diff) + du (control dimensions)
+        n_cols = 2 + du
+        fig = plt.figure(figsize=(5*n_cols, 5 * n_cases))
+        gs = fig.add_gridspec(n_cases, n_cols, hspace=0.3, wspace=0.3)
         
         for case_idx, case in enumerate(divergence_cases):
-            # Plot 1: State trajectories comparison
-            ax1 = fig.add_subplot(gs[case_idx, 0])
             lqr_traj = case["lqr_trajectory"]
             mm_traj = case["mm_trajectory"]
             steps = np.arange(len(lqr_traj))
             
-            state_names = ['x', 'x_dot', 'theta', 'theta_dot']
-            for i in range(4):
+            # Determine state dimension
+            n_states = lqr_traj.shape[1] if lqr_traj.ndim == 2 else 4
+            state_names, state_units, _ = self._get_state_metadata(n_states)
+            
+            # Plot 1: State trajectories comparison
+            ax1 = fig.add_subplot(gs[case_idx, 0])
+            for i in range(n_states):
                 ax1.plot(steps, lqr_traj[:, i], 'b-', alpha=0.7, linewidth=2, 
                         label='LQR' if i == 0 else '')
                 ax1.plot(steps[:len(mm_traj)], mm_traj[:len(mm_traj), i], 'r--', 
@@ -1771,26 +2173,56 @@ class PolicyExtractor:
             ax2.legend()
             ax2.grid(True, alpha=0.3)
             
-            # Plot 3: Control actions comparison
-            ax3 = fig.add_subplot(gs[case_idx, 2])
-            lqr_inputs = case["lqr_inputs"]
-            mm_inputs = case["mm_inputs"]
-            min_len = min(len(lqr_inputs), len(mm_inputs))
-            steps_inputs = np.arange(min_len)
+            # Convert inputs to arrays
+            lqr_inputs_arr = convert_inputs(case["lqr_inputs"])
+            mm_inputs_arr = convert_inputs(case["mm_inputs"])
             
-            ax3.plot(steps_inputs, lqr_inputs[:min_len], 'b-', alpha=0.7, 
-                    linewidth=2, label='LQR')
-            ax3.plot(steps_inputs, mm_inputs[:min_len], 'r--', alpha=0.7, 
-                    linewidth=2, label='MM')
-            ax3.axvline(x=case["divergence_step"], color='black', linestyle=':', 
-                       linewidth=2)
-            ax3.set_xlabel('Time Step')
-            ax3.set_ylabel('Control Action')
-            ax3.set_title(f'Control Actions\n'
-                         f'Action diff at divergence: '
-                         f'{abs(case["divergence_action_lqr"] - case["divergence_action_mm"]):.4f}')
-            ax3.legend()
-            ax3.grid(True, alpha=0.3)
+            # Plot control actions - one subplot per dimension
+            for dim in range(du):
+                ax3 = fig.add_subplot(gs[case_idx, 2 + dim])
+                
+                if lqr_inputs_arr is not None and mm_inputs_arr is not None:
+                    min_len = min(len(lqr_inputs_arr), len(mm_inputs_arr))
+                    steps_inputs = np.arange(min_len)
+                    
+                    # Extract this dimension's inputs
+                    if du == 1:
+                        lqr_dim = lqr_inputs_arr[:min_len] if lqr_inputs_arr.ndim == 1 else lqr_inputs_arr[:min_len, 0]
+                        mm_dim = mm_inputs_arr[:min_len] if mm_inputs_arr.ndim == 1 else mm_inputs_arr[:min_len, 0]
+                    else:
+                        lqr_dim = lqr_inputs_arr[:min_len, dim]
+                        mm_dim = mm_inputs_arr[:min_len, dim]
+                    
+                    ax3.plot(steps_inputs, lqr_dim, 'b-', alpha=0.7, 
+                            linewidth=2, label='LQR')
+                    ax3.plot(steps_inputs, mm_dim, 'r--', alpha=0.7, 
+                            linewidth=2, label='MM')
+                    ax3.axvline(x=case["divergence_step"], color='black', linestyle=':', 
+                               linewidth=2)
+                    
+                    # Compute action difference at divergence
+                    div_action_lqr = case["divergence_action_lqr"]
+                    div_action_mm = case["divergence_action_mm"]
+                    if div_action_lqr is not None and div_action_mm is not None:
+                        lqr_u_div = np.asarray(div_action_lqr).reshape(-1)
+                        mm_u_div = np.asarray(div_action_mm).reshape(-1)
+                        if du == 1:
+                            action_diff = abs(lqr_u_div[0] - mm_u_div[0])
+                        else:
+                            action_diff = np.linalg.norm(lqr_u_div - mm_u_div)
+                        title_suffix = f'\nAction diff: {action_diff:.4f}'
+                    else:
+                        title_suffix = ''
+                    
+                    ax3.set_xlabel('Time Step')
+                    if du == 1:
+                        ax3.set_ylabel('Control Action')
+                        ax3.set_title(f'Control Actions{title_suffix}')
+                    else:
+                        ax3.set_ylabel(f'Control Action (dim {dim+1})')
+                        ax3.set_title(f'Control Actions {dim+1}{title_suffix}')
+                    ax3.legend()
+                    ax3.grid(True, alpha=0.3)
         
         plt.suptitle(f'Policy Divergence Analysis: {n_cases} Cases Where LQR Succeeds but MM Fails',
                      fontsize=14, fontweight='bold', y=0.995)

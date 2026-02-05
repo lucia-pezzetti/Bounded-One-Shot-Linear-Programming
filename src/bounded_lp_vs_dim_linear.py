@@ -2,16 +2,22 @@
 import json
 import numpy as np
 import cvxpy as cp
+import sys
 from pathlib import Path
 from sklearn.preprocessing import PolynomialFeatures
 from scipy.linalg import solve_discrete_are
 from scipy import sparse
-from policy_extraction import PolicyExtractor
+from feature_scaling import FilteredPolynomialFeatures
+from dynamical_systems_polished import dlqr
+
+# Add parent directory to path to import from data module
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from data.load_systems import load_system, get_available_dimensions
 
 # -------------------------
 # Config (defaults; can be overridden by CLI)
 # -------------------------
-degree = 2           # polynomial feature degree
+degree = 1           # polynomial feature degree
 M_offline = 500      # auxiliary pool size for building P_y
 
 # Sampling bounds for generating (x,u) datasets
@@ -20,23 +26,6 @@ x_bound = 3.0        # states sampled in [-x_bound, x_bound]
 u_bound = 1.0        # inputs sampled in [-u_bound, u_bound]
 
 du = 2               # fixed input dimension
-
-def load_system_json(data_dir: Path, dx: int):
-    """Load A, B, C from ../data/dx_%d.json"""
-    fname = data_dir / f"dx_{dx}.json"
-    with open(fname, "r") as f:
-        data = json.load(f)
-    A = np.array(data["A"], dtype=float)
-    B = np.array(data["B"], dtype=float)
-    C = np.array(data["C"], dtype=float)
-    # Basic checks
-    if A.shape != (dx, dx):
-        raise ValueError(f"A shape mismatch for dx={dx}: got {A.shape}, expected {(dx, dx)}")
-    if B.shape[0] != dx or B.shape[1] != du:
-        raise ValueError(f"B shape mismatch for dx={dx}, du={du}: got {B.shape}, expected {(dx, du)}")
-    if C.shape != (dx, dx):
-        raise ValueError(f"C shape mismatch for dx={dx}: got {C.shape}, expected {(dx, dx)}")
-    return A, B, C
 
 def stage_cost(x: np.ndarray, u: np.ndarray, C: np.ndarray, rho):
     """
@@ -98,11 +87,7 @@ def compute_optimal_Q(A, B, C_cost, gamma, rho):
     Ad = np.sqrt(gamma) * A
     Rd = R_lqr / gamma
     
-    try:
-        P = solve_discrete_are(Ad, B, Q_lqr, Rd)
-    except Exception as e:
-        print(f"Warning: Failed to solve discrete ARE: {e}")
-        return None
+    P = solve_discrete_are(Ad, B, Q_lqr, Rd)
     
     # Compute optimal Q-function components
     Qxx = Q_lqr + gamma * (A.T @ P @ A)
@@ -118,7 +103,352 @@ def compute_optimal_Q(A, B, C_cost, gamma, rho):
     return Q_optimal_sa
 
 
-def compare_Q_matrices(Q_learned, Q_optimal, test_samples=None, poly=None):
+def extract_mm_policy_analytical_degree1(Q_learned, dx, du, u_bounds):
+    """
+    Extract moment matching policy analytically for degree 1 polynomial features.
+    
+    For degree 1, features are φ = [x1, x2, ..., x_dx, u1, u2, ..., u_du]
+    Q-function: φ^T Q φ = x^T Q_xx x + 2x^T Q_xu u + u^T Q_uu u
+    Optimal u: ∂/∂u = 0 → 2Q_xu^T x + 2Q_uu u = 0 → u = -Q_uu^{-1} Q_xu^T x
+    
+    Args:
+        Q_learned: Learned Q matrix (dx+du, dx+du) in feature space
+        dx: State dimension
+        du: Input dimension
+        u_bounds: Tuple (u_min, u_max) for action clipping
+        
+    Returns:
+        Policy function that takes state x and returns optimal action u
+    """
+    # Partition Q matrix
+    Q_xx = Q_learned[:dx, :dx]          # State-state interactions
+    Q_xu = Q_learned[:dx, dx:]          # State-action interactions
+    Q_uu = Q_learned[dx:, dx:]          # Action-action interactions
+    
+    # Pre-compute Q_uu inverse
+    Q_uu_inv = np.linalg.inv(Q_uu)
+    
+    # Pre-compute gain matrix: K = -Q_uu^{-1} Q_xu^T
+    K_mm = -Q_uu_inv @ Q_xu.T
+    
+    def mm_policy(x):
+        """
+        Moment matching policy: u = K_mm @ x
+        
+        Args:
+            x: State vector, shape (dx,) or (n, dx)
+            
+        Returns:
+            u: Action vector, shape (du,) or (n, du)
+        """
+        x = np.asarray(x)
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+        
+        # Compute optimal action: u = K_mm @ x^T
+        u = (K_mm @ x.T).T  # Shape: (n, du)
+        
+        # Clip to bounds
+        u = np.clip(u, u_bounds[0], u_bounds[1])
+        
+        # Return format: scalar for single state/single control, array otherwise
+        if u.shape[0] == 1 and u.shape[1] == 1:
+            return float(u[0, 0])
+        elif u.shape[0] == 1:
+            return u[0]
+        elif u.shape[1] == 1:
+            return u.flatten()
+        else:
+            return u
+    
+    return mm_policy
+
+
+def compare_policy_costs(A, B, C_cost, rho, gamma, Q_learned, poly, dx, du, n_test_states=100, horizon=1000, seed=0):
+    """
+    Compare online costs of moment matching policy vs LQR policy.
+    
+    Args:
+        A, B, C_cost: System matrices
+        rho: Control cost weight
+        gamma: Discount factor
+        Q_learned: Learned Q matrix from moment matching (in feature space)
+        poly: PolynomialFeatures object for feature transformation
+        dx: State dimension
+        du: Input dimension
+        n_test_states: Number of test initial states
+        horizon: Simulation horizon
+        seed: Random seed for test states
+        
+    Returns:
+        dict: Comparison metrics including normalized cost difference
+    """
+    if Q_learned is None:
+        return {"error": "Q_learned is None"}
+
+    # Create LQR system
+    system = dlqr(A, B, C_cost, rho, gamma)
+    
+    # Extract LQR policy directly (reimplemented from PolicyExtractor)
+    P_lqr, K_lqr, q_lqr = system.optimal_solution()
+    
+    # Create LQR policy function
+    def lqr_policy(x):
+        """
+        LQR policy: u = -K @ x, clipped to bounds.
+        
+        Args:
+            x: State vector, shape (dx,) or (n, dx)
+            
+        Returns:
+            u: Control action, shape (du,) or (n, du)
+        """
+        x = np.asarray(x)
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+        # Standard LQR control law: u = -K @ x
+        u = -K_lqr @ x.T  # Shape: (du, n)
+        u = u.T  # Shape: (n, du)
+        # Clip to bounds (element-wise for vector controls)
+        u = np.clip(u, -u_bound, u_bound)
+        # Return format: scalar for single state/single control, array otherwise
+        if u.shape[0] == 1 and u.shape[1] == 1:
+            return float(u[0, 0])
+        elif u.shape[0] == 1:
+            return u[0]  # Shape: (du,)
+        elif u.shape[1] == 1:
+            return u.flatten()  # Shape: (n,)
+        else:
+            return u  # Shape: (n, du)
+    
+    # Extract moment matching policy analytically (degree 1)
+    mm_policy = extract_mm_policy_analytical_degree1(Q_learned, dx, du, (-u_bound, u_bound))
+    
+    # Scale number of test states with dimension for better coverage
+    n_test_states = 100 * int(dx)
+    
+    # Generate test initial states
+    rng = np.random.default_rng(seed + 2000)
+    test_states = rng.uniform(-x_bound, x_bound, size=(n_test_states, dx))
+    
+    # Simulate both policies and compute costs
+    lqr_costs = []
+    mm_costs = []
+    lqr_success = []
+    mm_success = []
+
+    for i in range(n_test_states):
+        x0 = test_states[i]
+        
+        # Simulate LQR policy
+        x_current = x0.copy()
+        lqr_cost = 0.0
+        lqr_succ = True
+        for step in range(horizon):
+            u = lqr_policy(x_current)
+            # Convert to numpy array and ensure proper shape
+            u = np.asarray(u)
+            if u.ndim == 0:
+                u = u.reshape(1)  # Scalar -> (1,)
+            elif u.ndim > 1:
+                u = u.flatten()  # Flatten if needed
+            
+            # Check finiteness
+            if not np.isfinite(u).all():
+                lqr_succ = False
+                break
+            
+            # Clip to bounds (element-wise for vector controls)
+            u = np.clip(u, -u_bound, u_bound)
+            
+            # Ensure u has shape (du,) for system.step and (1, du) for stage_cost
+            u_for_step = u if u.shape == (du,) else u.reshape(du)
+            u_for_cost = u.reshape(1, -1) if u.ndim == 1 else u
+            
+            # Compute cost
+            cost = stage_cost(x_current.reshape(1, -1), u_for_cost, C_cost, rho)[0]
+            if not np.isfinite(cost):
+                print(f"lqr_cost is not finite")
+                lqr_succ = False
+                break
+            lqr_cost += (gamma ** step) * cost
+            
+            # Update state
+            x_current = system.step(x_current, u_for_step)
+            
+            # Check for convergence (close to origin)
+            if np.linalg.norm(x_current) < 1e-3:
+                break
+        
+        # print(f"lqr_cost: {lqr_cost}")
+
+        # Simulate MM policy
+        x_current = x0.copy()
+        mm_cost = 0.0
+        mm_succ = True
+        for step in range(horizon):
+            u = mm_policy(x_current)
+            # Convert to numpy array and ensure proper shape
+            u = np.asarray(u)
+            if u.ndim == 0:
+                u = u.reshape(1)  # Scalar -> (1,)
+            elif u.ndim > 1:
+                u = u.flatten()  # Flatten if needed
+            
+            # Check finiteness
+            if not np.isfinite(u).all():
+                mm_succ = False
+                break
+            
+            # Clip to bounds (element-wise for vector controls)
+            u = np.clip(u, -u_bound, u_bound)
+            
+            # Ensure u has shape (du,) for system.step and (1, du) for stage_cost
+            u_for_step = u if u.shape == (du,) else u.reshape(du)
+            u_for_cost = u.reshape(1, -1) if u.ndim == 1 else u
+            
+            # Compute cost
+            cost = stage_cost(x_current.reshape(1, -1), u_for_cost, C_cost, rho)[0]
+            if not np.isfinite(cost):
+                print(f"mm_cost is not finite")
+                mm_succ = False
+                break
+            mm_cost += (gamma ** step) * cost
+            
+            # Update state
+            x_current = system.step(x_current, u_for_step)
+            
+            # Check for convergence (close to origin)
+            if np.linalg.norm(x_current) < 1e-3:
+                break
+        
+        # print(f"mm_cost: {mm_cost}")
+
+        lqr_costs.append(lqr_cost if lqr_succ else np.inf)
+        mm_costs.append(mm_cost if mm_succ else np.inf)
+        lqr_success.append(lqr_succ)
+        mm_success.append(mm_succ)
+    
+    # Compute comparison metrics
+    metrics = {}
+    
+    # Only compare cases where both policies succeeded
+    both_success_indices = [i for i in range(n_test_states) if lqr_success[i] and mm_success[i]]
+    
+    if len(both_success_indices) > 0:
+        lqr_costs_both = [lqr_costs[i] for i in both_success_indices]
+        mm_costs_both = [mm_costs[i] for i in both_success_indices]
+        
+        lqr_costs_arr = np.array(lqr_costs_both)
+        mm_costs_arr = np.array(mm_costs_both)
+        
+        # Normalized cost difference: (MM_cost - LQR_cost) / LQR_cost
+        cost_diff = mm_costs_arr - lqr_costs_arr
+        normalized_diff = cost_diff / (lqr_costs_arr + 1e-8)
+        # print(f"normalized_diff: {normalized_diff}")
+        
+        metrics["policy_cost_diff_mean"] = np.mean(cost_diff)
+        metrics["policy_cost_diff_std"] = np.std(cost_diff)
+        metrics["policy_cost_normalized_diff_mean"] = np.mean(normalized_diff)
+        metrics["policy_cost_normalized_diff_std"] = np.std(normalized_diff)
+        metrics["policy_cost_lqr_mean"] = np.mean(lqr_costs_arr)
+        metrics["policy_cost_mm_mean"] = np.mean(mm_costs_arr)
+        metrics["policy_cost_n_comparisons"] = len(lqr_costs_both)
+    else:
+        # Store NaN for metrics when no successful comparisons
+        # This ensures the columns exist in the dataframe for aggregation
+        metrics["policy_cost_diff_mean"] = np.nan
+        metrics["policy_cost_diff_std"] = np.nan
+        metrics["policy_cost_normalized_diff_mean"] = np.nan
+        metrics["policy_cost_normalized_diff_std"] = np.nan
+        metrics["policy_cost_lqr_mean"] = np.nan
+        metrics["policy_cost_mm_mean"] = np.nan
+        metrics["policy_cost_n_comparisons"] = 0
+    
+    metrics["policy_cost_lqr_success_rate"] = np.mean(lqr_success) if len(lqr_success) > 0 else 0.0
+    metrics["policy_cost_mm_success_rate"] = np.mean(mm_success) if len(mm_success) > 0 else 0.0
+    metrics["policy_cost_n_test_states"] = n_test_states
+    
+    # -------------------------
+    # Value function comparison
+    # V(x) = min_u Q(x, u)
+    # For LQR: V_lqr(x) = x^T P_lqr x
+    # For MM (degree 1): V_mm(x) = x^T (Q_xx - Q_xu Q_uu^{-1} Q_xu^T) x
+    # -------------------------
+    # Extract blocks from Q_learned for degree 1: features are [x1, ..., x_dx, u1, ..., u_du]
+    Q_xx = Q_learned[:dx, :dx]
+    Q_xu = Q_learned[:dx, dx:]
+    Q_ux = Q_learned[dx:, :dx]
+    Q_uu = Q_learned[dx:, dx:]
+    
+    # Compute MM value function matrix: P_mm = Q_xx - Q_xu Q_uu^{-1} Q_xu^T
+    Q_uu_inv = np.linalg.inv(Q_uu)
+    
+    P_mm = Q_xx - Q_xu @ Q_uu_inv @ Q_xu.T
+    
+    # Evaluate value functions at all test states
+    V_lqr_values = np.array([test_states[i] @ P_lqr @ test_states[i] for i in range(n_test_states)])
+    V_mm_values = np.array([test_states[i] @ P_mm @ test_states[i] for i in range(n_test_states)])
+    
+    # Compute statistics
+    V_lqr_mean = np.mean(V_lqr_values)
+    V_mm_mean = np.mean(V_mm_values)
+    
+    # Absolute difference
+    V_diff = V_mm_values - V_lqr_values
+    V_diff_mean = np.mean(V_diff)
+    V_diff_std = np.std(V_diff)
+    
+    # Normalized difference: (V_mm - V_lqr) / V_lqr
+    V_normalized_diff = V_diff / (V_lqr_values + 1e-8)
+    if V_lqr_values.any() < 1:
+        print(f"V_lqr_values: {V_lqr_values}")
+        print(f"V_mm_values: {V_mm_values}")
+        print(f"V_diff: {V_diff}")
+        print(f"V_normalized_diff: {V_normalized_diff}")
+        raise Exception("V_lqr_values is less than 1")
+    # print(f"V_normalized_diff: {V_normalized_diff}")
+    V_normalized_diff_mean = np.mean(V_normalized_diff)
+    V_normalized_diff_std = np.std(V_normalized_diff)
+    
+    # Store value function metrics
+    metrics["value_func_lqr_mean"] = V_lqr_mean
+    metrics["value_func_mm_mean"] = V_mm_mean
+    metrics["value_func_diff_mean"] = V_diff_mean
+    metrics["value_func_diff_std"] = V_diff_std
+    metrics["value_func_normalized_diff_mean"] = V_normalized_diff_mean
+    metrics["value_func_normalized_diff_std"] = V_normalized_diff_std
+    
+    # Also store the matrix norm difference between P_lqr and P_mm
+    P_diff_frob = np.linalg.norm(P_mm - P_lqr, 'fro')
+    P_diff_normalized = P_diff_frob / (np.linalg.norm(P_lqr, 'fro') + 1e-8)
+    metrics["value_matrix_diff_frob"] = P_diff_frob
+    metrics["value_matrix_diff_normalized"] = P_diff_normalized
+    
+    # -------------------------
+    # K matrix comparison (gain matrices)
+    # LQR: u = -K_lqr @ x
+    # MM:  u = K_mm @ x where K_mm = -Q_uu^{-1} @ Q_xu^T
+    # -------------------------
+    # Compute K_mm from Q_learned
+    K_mm = -Q_uu_inv @ Q_xu.T
+    
+    # Compute relative difference between K matrices
+    # Note: LQR uses u = -K_lqr @ x, so we compare K_mm with -K_lqr
+    K_diff = K_mm - (-K_lqr)  # K_mm vs -K_lqr (both have same sign convention for u = K @ x)
+    K_diff_frob = np.linalg.norm(K_diff, 'fro')
+    K_lqr_frob = np.linalg.norm(K_lqr, 'fro')
+    K_diff_normalized = K_diff_frob / (K_lqr_frob + 1e-8)
+    
+    metrics["K_diff_frob"] = K_diff_frob
+    metrics["K_diff_normalized"] = K_diff_normalized
+    metrics["K_lqr_frob"] = K_lqr_frob
+    metrics["K_mm_frob"] = np.linalg.norm(K_mm, 'fro')
+    
+    return metrics
+
+
+def compare_Q_matrices(Q_learned, Q_optimal, test_samples=None, poly=None, dx=None, du=None, C_val=None):
     """
     Compare the learned Q matrix with the optimal Q matrix using trace difference and Q-function evaluation.
     
@@ -127,6 +457,9 @@ def compare_Q_matrices(Q_learned, Q_optimal, test_samples=None, poly=None):
         Q_optimal: Optimal Q matrix from LQR theory (in original state-action space)
         test_samples: Optional test samples (x, u) for Q-function evaluation
         poly: PolynomialFeatures object for feature transformation
+        dx: State dimension
+        du: Input dimension
+        C_val: Covariance matrix from MM stage 1 (C_val = Σ mu_i * y_i y_i^T)
     Returns:
         dict: Comparison metrics
     """
@@ -136,7 +469,7 @@ def compare_Q_matrices(Q_learned, Q_optimal, test_samples=None, poly=None):
     metrics = {}
     
     # Trace difference - the matrices are in the same feature space since degree=1
-    trace_diff_abs = np.abs(np.trace(Q_learned) - np.trace(Q_optimal))
+    trace_diff_abs = np.trace(Q_learned) - np.trace(Q_optimal)
     
     # Normalize trace error by the scale of the optimal Q matrix entries
     # Better options for trace-specific normalization:
@@ -148,11 +481,11 @@ def compare_Q_matrices(Q_learned, Q_optimal, test_samples=None, poly=None):
     # Option 1: Normalize by trace of optimal Q (most direct for trace error)
     trace_optimal = np.trace(Q_optimal)
     if abs(trace_optimal) > 1e-10:  # Avoid division by zero
-        metrics["trace_diff"] = trace_diff_abs / abs(trace_optimal)
+        metrics["trace_diff"] = trace_diff_abs / trace_optimal
         metrics["trace_diff_abs"] = trace_diff_abs  # Keep absolute value for reference
     else:
         # Fallback: normalize by mean absolute value of matrix entries
-        mean_abs_optimal = np.mean(np.abs(Q_optimal))
+        mean_abs_optimal = np.mean(Q_optimal)
         if mean_abs_optimal > 1e-10:
             metrics["trace_diff"] = trace_diff_abs / mean_abs_optimal
             metrics["trace_diff_abs"] = trace_diff_abs
@@ -160,66 +493,51 @@ def compare_Q_matrices(Q_learned, Q_optimal, test_samples=None, poly=None):
             metrics["trace_diff"] = trace_diff_abs  # Final fallback to absolute
             metrics["trace_diff_abs"] = trace_diff_abs
     
-    print(f"Trace difference (normalized): {metrics['trace_diff']:.6f}")
-    print(f"Trace difference (absolute): {metrics['trace_diff_abs']:.6f}")
-    print(f"Optimal Q matrix trace: {np.trace(Q_optimal)}")
-    print(f"Learned Q matrix trace: {np.trace(Q_learned)}")
-    print(f"Trace difference (learned Q - optimal Q): {np.trace(Q_learned) - np.trace(Q_optimal)}")
+    # Weighted trace comparison using C_val from MM LP (the direction of optimization)
+    # This compares trace(C_val @ Q_learned) vs trace(C_val @ Q_optimal)
+    if C_val is not None:
+        weighted_trace_learned = np.trace(C_val @ Q_learned)
+        weighted_trace_optimal = np.trace(C_val @ Q_optimal)
+        weighted_trace_diff_abs = weighted_trace_learned - weighted_trace_optimal
+        
+        # Normalize by the optimal weighted trace
+        if abs(weighted_trace_optimal) > 1e-10:
+            metrics["weighted_trace_diff"] = weighted_trace_diff_abs / weighted_trace_optimal
+            metrics["weighted_trace_diff_abs"] = weighted_trace_diff_abs
+        else:
+            metrics["weighted_trace_diff"] = weighted_trace_diff_abs
+            metrics["weighted_trace_diff_abs"] = weighted_trace_diff_abs
+        
+        metrics["weighted_trace_learned"] = weighted_trace_learned
+        metrics["weighted_trace_optimal"] = weighted_trace_optimal
 
     # Q-function evaluation on test samples
-    print(f"Q-function evaluation conditions: test_samples={test_samples is not None}, poly={poly is not None}")
     if test_samples is not None and poly is not None:
-        try:
-            x_test, u_test = test_samples
-            
-            # Transform test samples to polynomial features
-            z_test = np.concatenate([x_test, u_test], axis=1)
-            phi_test = poly.transform(z_test)
-            
-            # Evaluate learned Q-function (in scaled feature space)
-            Q_learned_values = np.array([phi_test[i] @ Q_learned @ phi_test[i] 
-                                       for i in range(len(phi_test))])
-            
-            # Evaluate optimal Q-function (in original state-action space)
-            Q_optimal_values = np.array([z_test[i] @ Q_optimal @ z_test[i] 
-                                       for i in range(len(z_test))])
-            
-            # Compute comparison metrics
-            metrics["q_value_diff_mean"] = np.mean(np.abs(Q_learned_values - Q_optimal_values))
-            print(f"Q-value difference (mean): {metrics['q_value_diff_mean']}")
-            metrics["q_value_diff_std"] = np.std(np.abs(Q_learned_values - Q_optimal_values))
-            print(f"Q-value difference (std): {metrics['q_value_diff_std']}")
-            metrics["q_value_diff_max"] = np.max(np.abs(Q_learned_values - Q_optimal_values))
-            print(f"Q-value difference (max): {metrics['q_value_diff_max']}")
-            metrics["q_value_correlation"] = np.corrcoef(Q_learned_values, Q_optimal_values)[0, 1]
-            print(f"Q-value correlation: {metrics['q_value_correlation']}")
-            
-            # Relative error metrics
-            metrics["q_value_rel_error_mean"] = np.mean(np.abs(Q_learned_values - Q_optimal_values) / 
-                                                       (np.abs(Q_optimal_values) + 1e-8))
-            metrics["q_value_rel_error_std"] = np.std(np.abs(Q_learned_values - Q_optimal_values) / 
-                                                     (np.abs(Q_optimal_values) + 1e-8))
-            
-            # Check value function positivity for learned Q matrix
-            print("\n=== Checking Value Function Positivity ===")
-            extractor = PolicyExtractor()
-            positivity_results = extractor.check_value_function_positivity(
-                Q_learned, poly, n_samples=1000, verbose=True
-            )
-            
-            # Add positivity results to metrics
-            metrics["value_function_all_positive"] = positivity_results["all_positive"]
-            metrics["value_function_positive_ratio"] = positivity_results["positive_ratio"]
-            metrics["value_function_min_value"] = positivity_results["min_value"]
-            metrics["value_function_max_value"] = positivity_results["max_value"]
-            metrics["value_function_mean_value"] = positivity_results["mean_value"]
-            metrics["value_function_n_samples"] = positivity_results["n_samples"]
-            
-        except Exception as e:
-            print(f"Error in Q-function evaluation: {e}")
-            metrics["q_value_error"] = str(e)
-    else:
-        print("Q-function evaluation skipped due to missing parameters")
+        x_test, u_test = test_samples
+        
+        # Transform test samples to polynomial features
+        z_test = np.concatenate([x_test, u_test], axis=1)
+        phi_test = poly.transform(z_test)
+        
+        # Evaluate learned Q-function (in scaled feature space)
+        Q_learned_values = np.array([phi_test[i] @ Q_learned @ phi_test[i] 
+                                   for i in range(len(phi_test))])
+        
+        # Evaluate optimal Q-function (in original state-action space)
+        Q_optimal_values = np.array([z_test[i] @ Q_optimal @ z_test[i] 
+                                   for i in range(len(z_test))])
+        
+        # Compute comparison metrics
+        metrics["q_value_diff_mean"] = np.mean(Q_learned_values - Q_optimal_values)
+        metrics["q_value_diff_std"] = np.std(Q_learned_values - Q_optimal_values)
+        metrics["q_value_diff_max"] = np.max(Q_learned_values - Q_optimal_values)
+        metrics["q_value_correlation"] = np.corrcoef(Q_learned_values, Q_optimal_values)[0, 1]
+        
+        # Relative error metrics
+        metrics["q_value_rel_error_mean"] = np.mean((Q_learned_values - Q_optimal_values) / 
+                                                   (Q_optimal_values + 1e-8))
+        metrics["q_value_rel_error_std"] = np.std((Q_learned_values - Q_optimal_values) / 
+                                                 (Q_optimal_values + 1e-8))
     
     return metrics
 
@@ -263,25 +581,17 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
     # Objective: make C ≈ I without materializing dense arrays
     I_d = cp.Constant(sparse.eye(d, format="csr"))
     C_approx = sum_PyPyT
-    objective = cp.Minimize(cp.norm(C_approx - I_d, "fro"))
+    # objective = cp.Minimize(cp.norm(C_approx - I_d, "fro"))
+    objective = cp.Minimize(cp.norm(moment_match, "fro"))
 
     prob = cp.Problem(objective, constraints)
-    try:
-        mosek_params = {
-            "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-9,
-            "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-9,
-            "MSK_DPAR_INTPNT_TOL_REL_GAP": 1e-9,
-            "MSK_IPAR_INTPNT_BASIS": 1
-        }
-        prob.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
-    except Exception:
-        try:
-            prob.solve(solver=cp.SCS, verbose=False)
-        except Exception:
-            try:
-                prob.solve(solver=cp.ECOS, verbose=False)
-            except Exception:
-                prob.solve(verbose=False)
+    mosek_params = {
+        "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-9,
+        "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-9,
+        "MSK_DPAR_INTPNT_TOL_REL_GAP": 1e-9,
+        "MSK_IPAR_INTPNT_BASIS": 1
+    }
+    prob.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
     status1 = prob.status
 
     if status1 not in ("optimal", "optimal_inaccurate"):
@@ -315,27 +625,19 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
         
     obj = cp.Maximize(cp.sum(terms))
     prob_lp = cp.Problem(obj, cons)
-    try:
-        mosek_params = {
-            "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-9,
-            "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-9,
-            "MSK_DPAR_INTPNT_TOL_REL_GAP": 1e-9,
-            "MSK_IPAR_INTPNT_BASIS": 1
-        }
-        prob_lp.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
-    except Exception:
-        try:
-            prob_lp.solve(solver=cp.SCS, verbose=False)
-        except Exception:
-            try:
-                prob_lp.solve(solver=cp.ECOS, verbose=False)
-            except Exception:
-                prob_lp.solve(verbose=False)
+    mosek_params = {
+        "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-9,
+        "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-9,
+        "MSK_DPAR_INTPNT_TOL_REL_GAP": 1e-9,
+        "MSK_IPAR_INTPNT_BASIS": 1
+    }
+    prob_lp.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
     status2 = prob_lp.status
     
     # Return the learned Q matrix, polynomial features, and optimization values if successful
     if status2 in ("optimal", "optimal_inaccurate"):
         Q_learned = Q.value
+        Q_learned = 0.5 * (Q_learned + Q_learned.T)
         # Q_learned_mat = Q_learned.reshape((d, d), order="C")
         E_Q_learned = prob_lp.value
         return status2, status1, Q_learned, C_val, E_Q_learned, mu
@@ -381,21 +683,12 @@ def solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, du):
     objective = cp.Maximize(cp.trace(cp.Constant(C_matrix) @ Q_id))
     prob = cp.Problem(objective, cons)
 
-    try:
-        prob.solve(solver=cp.MOSEK, verbose=False)
-    except Exception:
-        try:
-            prob.solve(solver=cp.SCS, verbose=False)
-        except Exception:
-            try:
-                prob.solve(solver=cp.ECOS, verbose=False)
-            except Exception:
-                prob.solve(verbose=False)
+    prob.solve(solver=cp.MOSEK, verbose=False)
 
     return prob.status
 
 
-def run_one(seed, dx, A, B, C_cost, N, gamma, M_offline, degree, rho):
+def run_one(seed, dx, A, B, C_cost, N, gamma, M_offline, degree, rho, exclude_u_squared=False):
     """Generate a dataset and solve both LPs; return boundedness flags and Q quality comparison."""
     # Set seed for reproducibility
     np.random.seed(seed)
@@ -406,7 +699,12 @@ def run_one(seed, dx, A, B, C_cost, N, gamma, M_offline, degree, rho):
     z = np.concatenate([x, u], axis=1)
     z_plus = np.concatenate([x_plus, u_plus], axis=1)
     
-    poly = PolynomialFeatures(degree=degree, include_bias=False)
+    # Use filtered polynomial features if exclude_u_squared is True
+    if exclude_u_squared:
+        du = B.shape[1]
+        poly = FilteredPolynomialFeatures(degree=degree, include_bias=False, dx=dx, du=du, exclude_u_squared=True)
+    else:
+        poly = PolynomialFeatures(degree=degree, include_bias=False)
     
     Z_all = np.concatenate([z, z_plus], axis=0)
     P_all = poly.fit_transform(Z_all)
@@ -438,49 +736,70 @@ def run_one(seed, dx, A, B, C_cost, N, gamma, M_offline, degree, rho):
     
     # Add Q quality comparison if moment matching was successful
     if is_bounded(status_m2) and Q_learned is not None and C_val is not None and E_Q_learned is not None:
-        try:
-            # Compute optimal Q matrix (in original state-action space)
-            Q_optimal_orig = compute_optimal_Q(A, B, C_cost, gamma, rho)
+        # Compute optimal Q matrix (in original state-action space)
+        Q_optimal_orig = compute_optimal_Q(A, B, C_cost, gamma, rho)
+        
+        if Q_optimal_orig is not None:
+            # Generate test samples for Q-function evaluation
+            n_test = 1000  # Number of test samples
+            x_test, u_test = auxiliary_samples(n_test, dx, B.shape[1], seed=seed + 1000)
+            test_samples = (x_test, u_test)
             
-            if Q_optimal_orig is not None:
-                # Generate test samples for Q-function evaluation
-                n_test = 1000  # Number of test samples
-                x_test, u_test = auxiliary_samples(n_test, dx, B.shape[1], seed=seed + 1000)
-                test_samples = (x_test, u_test)
-                
-                # Compare Q matrices using trace difference and Q-function evaluation
-                q_metrics = compare_Q_matrices(Q_learned, Q_optimal_orig, test_samples, poly)
-                
-                # Add metrics to result
-                for key, value in q_metrics.items():
-                    if isinstance(value, (int, float, np.number)):
-                        result[f"{key}"] = float(value)
-                    else:
-                        result[f"{key}"] = str(value)
-            else:
-                result["q_error"] = "Failed to compute optimal Q"
-        except Exception as e:
-            result["q_error"] = f"Q comparison failed: {str(e)}"
+            # Compare Q matrices using trace difference and Q-function evaluation
+            # Pass C_val for weighted trace comparison (using the MM LP direction)
+            q_metrics = compare_Q_matrices(Q_learned, Q_optimal_orig, test_samples, poly, dx=dx, du=B.shape[1], C_val=C_val)
+            
+            # Add metrics to result
+            for key, value in q_metrics.items():
+                if isinstance(value, (int, float, np.number)):
+                    result[f"{key}"] = float(value)
+                else:
+                    result[f"{key}"] = str(value)
+            
+            # Compare policy costs
+            policy_metrics = compare_policy_costs(A, B, C_cost, rho, gamma, Q_learned, poly, dx, B.shape[1], 
+                                                    n_test_states=100, horizon=1000, seed=seed + 3000)
+            for key, value in policy_metrics.items():
+                if isinstance(value, (int, float, np.number)):
+                    result[f"{key}"] = float(value)
+                else:
+                    result[f"{key}"] = str(value)
+        else:
+            result["q_error"] = "Failed to compute optimal Q"
     else:
         result["q_error"] = "Moment matching failed or Q not available"
     
     return result
 
-def sweep_over_dims(dims, data_dir: Path, seeds, N, gamma, M_offline, degree, rho):
+def sweep_over_dims(dims, seeds, N, gamma, M_offline, degree, rho, exclude_u_squared=False):
+    """
+    Sweep over dimensions and seeds, loading a different system for each seed.
+    
+    Each seed maps to a different system from the data/dx_{dx}_du_2_systems.json files.
+    There are 50 pre-generated controllable systems per dimension.
+    """
     results = []
+    available_dims = get_available_dimensions()
+    
     for dx in dims:
-        path = data_dir / f"dx_{dx}.json"
-        if not path.exists():
-            print(f"[WARN] Missing file: {path}. Skipping dx={dx}.")
+        # Check if systems are available for this dimension
+        if dx not in available_dims:
+            print(f"[WARN] No systems available for dx={dx}. Available: {available_dims}. Skipping.")
             continue
-        try:
-            A, B, C_cost = load_system_json(data_dir, dx)
-        except Exception as e:
-            print(f"[WARN] Failed to load/validate for dx={dx}: {e}. Skipping.")
-            continue          
-        for s in seeds:
-            print(f"Running seed {s} for dx={dx}")
-            results.append(run_one(seed=int(s), dx=int(dx), A=A, B=B, C_cost=C_cost, N=N, gamma=gamma, M_offline=M_offline, degree=degree, rho=rho))
+        
+        for i, s in enumerate(seeds):
+            # Use seed index to select different system (50 systems available per dimension)
+            system_idx = (i+7) % 50  # Wrap around if more than 50 seeds
+            
+            try:
+                A, B, C_cost = load_system(n=dx, idx=system_idx)
+            except Exception as e:
+                print(f"[WARN] Failed to load system for dx={dx}, idx={system_idx}: {e}. Skipping.")
+                continue
+            
+            print(f"Running seed {s} for dx={dx} (system {system_idx})")
+            results.append(run_one(seed=int(s), dx=int(dx), A=A, B=B, C_cost=C_cost, N=N, gamma=gamma, M_offline=M_offline, degree=degree, rho=rho, exclude_u_squared=exclude_u_squared))
+    
     return results
 
 if __name__ == "__main__":
@@ -489,7 +808,6 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     parser = argparse.ArgumentParser(description="Boundedness vs state dimension (linear systems).")
-    parser.add_argument("--data_dir", type=str, default="../data", help="Directory containing dx_%n.json files")
     parser.add_argument("--dims", type=str, default="", help="Comma-separated list of state dimensions (e.g., '4,8,12'). If empty, use --dmin.. arguments.")
     parser.add_argument("--dmin", type=int, default=2, help="Minimum dx (used if --dims is empty)")
     parser.add_argument("--dmax", type=int, default=30, help="Maximum dx (used if --dims is empty)")
@@ -501,22 +819,31 @@ if __name__ == "__main__":
     parser.add_argument("--M_offline", type=int, default=250, help="Offline pool size (default: 500)")
     parser.add_argument("--degree", type=int, default=1, help="Polynomial feature degree (default: 1)")
     parser.add_argument("--rho", type=float, default=0.001, help="Control cost weight (default: 0.1)")
-    parser.add_argument("--out_json", type=str, default="bounded_vs_dim_results_2.json", help="Raw results JSON")
-    parser.add_argument("--plot_dir", type=str, default="../figures/bounded_vs_dim_percentages_2.pdf", help="Plot filename")
+    parser.add_argument("--exclude_u_squared", action="store_true", help="Exclude u^2 terms from polynomial features (for degree 2)")
+    parser.add_argument("--out_json", type=str, default=None, help="Raw results JSON (if None, auto-generated with N)")
+    parser.add_argument("--plot_dir", type=str, default=None, help="Plot filename (if None, auto-generated with N)")
     parser.add_argument("--boundedness_threshold", type=float, default=50.0, help="Minimum boundedness percentage to include in trace plot (default: 50.0)")
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir)
     if args.dims.strip():
         dims = [int(s) for s in args.dims.split(",") if s.strip()]
     else:
         dims = list(range(args.dmin, args.dmax + 1, args.dstep))
     
     # Generate seeds for each experiment
-    # Start seeds from 0: 10, 11, ..., args.seeds + 9
+    # Each seed will use a different system (system_idx = seed_index % 50)
     seeds = list(range(21, args.seeds + 21))
+    
+    # Print available dimensions for reference
+    print(f"Available dimensions with pre-generated systems: {get_available_dimensions()}")
 
-    results = sweep_over_dims(dims, data_dir, seeds, N=args.N, gamma=args.gamma, M_offline=args.M_offline, degree=args.degree, rho=args.rho)
+    # Auto-generate filenames with N if not provided
+    if args.out_json is None:
+        args.out_json = f"bounded_vs_dim_results_N_{args.N}.json"
+    if args.plot_dir is None:
+        args.plot_dir = f"../figures/bounded_vs_dim_percentages_N_{args.N}.pdf"
+
+    results = sweep_over_dims(dims, seeds, N=args.N, gamma=args.gamma, M_offline=args.M_offline, degree=degree, rho=args.rho, exclude_u_squared=args.exclude_u_squared)
 
     if len(results) == 0:
         print("No results (no valid dimensions or files). Exiting.")
@@ -534,7 +861,8 @@ if __name__ == "__main__":
     agg["identity_bounded_pct"] = 100 * agg["identity_bounded_mean"]
 
     # Add Q quality metrics aggregation
-    q_metrics = ["trace_diff", "trace_diff_abs", "q_value_diff_mean", "q_value_diff_max", 
+    q_metrics = ["trace_diff", "trace_diff_abs", "weighted_trace_diff", "weighted_trace_diff_abs",
+                 "q_value_diff_mean", "q_value_diff_max", 
                  "q_value_correlation", "q_value_rel_error_mean"]
     
     for metric in q_metrics:
@@ -548,10 +876,90 @@ if __name__ == "__main__":
                 metric_agg = metric_agg.rename(columns={'mean': f'{metric}_mean', 'std': f'{metric}_std', 'min': f'{metric}_min', 'max': f'{metric}_max'})
                 # Merge with main aggregation
                 agg = agg.merge(metric_agg, on='dx', how='left')
+    
+    # Add policy cost metrics aggregation
+    policy_cost_metrics = ["policy_cost_normalized_diff_mean", "policy_cost_diff_mean", 
+                          "policy_cost_lqr_mean", "policy_cost_mm_mean"]
+    
+    # Add value function metrics aggregation
+    value_func_metrics = ["value_func_normalized_diff_mean", "value_func_diff_mean",
+                          "value_func_lqr_mean", "value_func_mm_mean",
+                          "value_matrix_diff_normalized",
+                          "K_diff_normalized", "K_diff_frob"]
+    
+    # Debug: Check what policy cost columns exist
+    policy_cost_cols = [col for col in df.columns if col.startswith("policy_cost")]
+    if len(policy_cost_cols) > 0:
+        print(f"\nPolicy cost columns found in dataframe: {policy_cost_cols}")
+        # Check for error columns
+        error_cols = [col for col in policy_cost_cols if "error" in col]
+        if len(error_cols) > 0:
+            print(f"Policy cost error columns: {error_cols}")
+            for col in error_cols:
+                error_counts = df[col].value_counts()
+                print(f"  {col} value counts:\n{error_counts}")
+    else:
+        print("\nWARNING: No policy cost columns found in dataframe!")
+        print("Available columns:", list(df.columns))
+    
+    for metric in policy_cost_metrics:
+        if metric in df.columns:
+            # Filter out non-numeric values (like error strings)
+            valid_data = df[df[metric].notna()].copy()
+            # Convert to numeric, coercing errors to NaN
+            valid_data[metric] = pd.to_numeric(valid_data[metric], errors='coerce')
+            valid_data = valid_data[valid_data[metric].notna()]
+            
+            if len(valid_data) > 0:
+                # Use groupby with proper aggregation
+                metric_agg = valid_data.groupby("dx")[metric].agg(['mean', 'std', 'min', 'max']).reset_index()
+                # Rename columns to match expected format
+                metric_agg = metric_agg.rename(columns={'mean': f'{metric}_mean', 'std': f'{metric}_std', 'min': f'{metric}_min', 'max': f'{metric}_max'})
+                # Merge with main aggregation
+                agg = agg.merge(metric_agg, on='dx', how='left')
+                print(f"Aggregated {metric}: {len(valid_data)} valid entries across {len(metric_agg)} dimensions")
+            else:
+                print(f"WARNING: No valid numeric data for {metric}")
+        else:
+            print(f"WARNING: Metric {metric} not found in dataframe columns")
+    
+    # Aggregate value function metrics
+    for metric in value_func_metrics:
+        if metric in df.columns:
+            # Filter out non-numeric values (like error strings)
+            valid_data = df[df[metric].notna()].copy()
+            # Convert to numeric, coercing errors to NaN
+            valid_data[metric] = pd.to_numeric(valid_data[metric], errors='coerce')
+            valid_data = valid_data[valid_data[metric].notna()]
+            
+            if len(valid_data) > 0:
+                # Use groupby with proper aggregation
+                metric_agg = valid_data.groupby("dx")[metric].agg(['mean', 'std', 'min', 'max']).reset_index()
+                # Rename columns to match expected format
+                metric_agg = metric_agg.rename(columns={'mean': f'{metric}_mean', 'std': f'{metric}_std', 'min': f'{metric}_min', 'max': f'{metric}_max'})
+                # Merge with main aggregation
+                agg = agg.merge(metric_agg, on='dx', how='left')
+                print(f"Aggregated {metric}: {len(valid_data)} valid entries across {len(metric_agg)} dimensions")
+            else:
+                print(f"WARNING: No valid numeric data for {metric}")
+
+    # Add individual seed values as lists for policy cost and value function metrics
+    key_metrics_to_list = ["policy_cost_normalized_diff_mean", "value_func_normalized_diff_mean"]
+    for metric in key_metrics_to_list:
+        if metric in df.columns:
+            # Get all individual values per dimension as a list
+            values_by_dx = df.groupby("dx")[metric].apply(
+                lambda x: [v for v in pd.to_numeric(x, errors='coerce').dropna().tolist()]
+            ).reset_index()
+            values_by_dx.columns = ["dx", f"{metric}_all_seeds"]
+            agg = agg.merge(values_by_dx, on='dx', how='left')
+            print(f"Added individual seed values for {metric}")
 
     # Save raw + aggregated
     df.to_json(args.out_json, orient="records", indent=2)
-    agg.to_json("bounded_vs_dim_percentages.json", orient="records", indent=2)
+    # Generate aggregated filename with N
+    agg_json_name = f"bounded_vs_dim_percentages_N_{args.N}.json"
+    agg.to_json(agg_json_name, orient="records", indent=2)
     
     # Print compact table
     cols = ["dx", "n",
@@ -567,6 +975,8 @@ if __name__ == "__main__":
     metric_names = {
         "trace_diff": "Relative trace error (|Δtrace|/|trace_optimal|)",
         "trace_diff_abs": "Absolute trace difference",
+        "weighted_trace_diff": "Relative weighted trace error (using C from MM LP)",
+        "weighted_trace_diff_abs": "Absolute weighted trace difference",
         "q_value_diff_mean": "Q-value difference (mean)",
         "q_value_diff_max": "Q-value difference (max)",
         "q_value_correlation": "Q-value correlation",
@@ -588,19 +998,28 @@ if __name__ == "__main__":
                 metric_name = metric_names.get(metric, metric)
                 print(f"{metric_name}: No successful comparisons")
     
-    # Create plots
-    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    # ===========================================
+    # FIGURE 1: Boundedness + Q matrix trace difference
+    # ===========================================
+    # Font sizes for plots
+    LABEL_SIZE = 20
+    TITLE_SIZE = 24
+    LEGEND_SIZE = 20
+    TICK_SIZE = 16
+    
+    fig1, axes1 = plt.subplots(1, 2, figsize=(14, 5))
     
     # Plot 1: Boundedness percentages
-    axes[0].plot(agg["dx"], agg["moment_bounded_pct"],
+    axes1[0].plot(agg["dx"], agg["moment_bounded_pct"],
                     marker="o", label="Moment matching", color="blue")
-    axes[0].plot(agg["dx"], agg["identity_bounded_pct"],
+    axes1[0].plot(agg["dx"], agg["identity_bounded_pct"],
                     marker="s", label="Identity covariance", color="red")
-    axes[0].set_xlabel("State dimension")
-    axes[0].set_ylabel("Bounded LPs (%)")
-    axes[0].set_title("Percentage of bounded LP problems vs state dimension")
-    axes[0].legend()
-    axes[0].grid(True)
+    axes1[0].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+    axes1[0].set_ylabel("Bounded LPs (%)", fontsize=LABEL_SIZE)
+    axes1[0].set_title("Percentage of bounded LP problems vs state dimension", fontsize=TITLE_SIZE)
+    axes1[0].legend(fontsize=LEGEND_SIZE)
+    axes1[0].tick_params(axis='both', labelsize=TICK_SIZE)
+    axes1[0].grid(True)
     
     # Plot 2: Trace difference (normalized and filtered by boundedness threshold)
     if "trace_diff_mean" in agg.columns:
@@ -610,29 +1029,303 @@ if __name__ == "__main__":
         
         if len(filtered_agg) > 0:
             # Plot the mean line
-            axes[1].plot(filtered_agg["dx"], filtered_agg["trace_diff_mean"], 
+            axes1[1].plot(filtered_agg["dx"], filtered_agg["trace_diff_mean"], 
                            marker="o", color="blue", label="Mean")
             # Add shaded region for min-max range
             if "trace_diff_min" in filtered_agg.columns and "trace_diff_max" in filtered_agg.columns:
-                axes[1].fill_between(filtered_agg["dx"], filtered_agg["trace_diff_min"], filtered_agg["trace_diff_max"], 
+                axes1[1].fill_between(filtered_agg["dx"], filtered_agg["trace_diff_min"], filtered_agg["trace_diff_max"], 
                                        alpha=0.3, color="blue", label="Min-Max range")
             
-            axes[1].set_xlabel("State dimension")
-            axes[1].set_ylabel("Relative trace error")
-            axes[1].set_title(f"Q matrix trace difference vs dimension")
-            axes[1].grid(True)
-            axes[1].legend()
+            axes1[1].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+            axes1[1].set_ylabel("Relative trace error", fontsize=LABEL_SIZE)
+            axes1[1].set_title(f"Q matrix trace difference vs dimension", fontsize=TITLE_SIZE)
+            axes1[1].tick_params(axis='both', labelsize=TICK_SIZE)
+            axes1[1].grid(True)
+            axes1[1].legend(fontsize=LEGEND_SIZE)
             
             print(f"Trace plot shows {len(filtered_agg)} dimensions with ≥{threshold}% boundedness")
         else:
-            axes[1].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
-                           ha="center", va="center", transform=axes[0, 1].transAxes)
-            axes[1].set_title(f"Q matrix trace difference vs dimension\n(≥{threshold}% boundedness)")
+            axes1[1].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+                           ha="center", va="center", transform=axes1[1].transAxes, fontsize=LABEL_SIZE)
+            axes1[1].set_title(f"Q matrix trace difference vs dimension", fontsize=TITLE_SIZE)
             print(f"No dimensions found with ≥{threshold}% boundedness")
     else:
-        axes[1].text(0.5, 0.5, "No trace difference data available", 
-                       ha="center", va="center", transform=axes[0, 1].transAxes)
-        axes[1].set_title("Q matrix trace difference vs dimension")
+        axes1[1].text(0.5, 0.5, "No trace difference data available", 
+                       ha="center", va="center", transform=axes1[1].transAxes, fontsize=LABEL_SIZE)
+        axes1[1].set_title("Q matrix trace difference vs dimension", fontsize=TITLE_SIZE)
+    
+    fig1.tight_layout()
+    # Generate filename for figure 1
+    fig1_path = args.plot_dir.replace(".pdf", "_boundedness.pdf")
+    fig1.savefig(fig1_path, dpi=150)
+    print(f"Saved Figure 1 (Boundedness + Trace): {fig1_path}")
+    plt.close(fig1)
+    
+    # ===========================================
+    # FIGURE 2: Policy cost + Value function comparison
+    # ===========================================
+    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Policy cost comparison (normalized difference)
+    if "policy_cost_normalized_diff_mean_mean" in agg.columns:
+        # Filter dimensions based on boundedness threshold
+        threshold = args.boundedness_threshold
+        filtered_agg = agg[agg["moment_bounded_pct"] >= threshold].copy()
+        
+        if len(filtered_agg) > 0:
+            # Plot the mean line
+            axes2[0].plot(filtered_agg["dx"], filtered_agg["policy_cost_normalized_diff_mean_mean"], 
+                           marker="o", color="green", label="Mean normalized difference")
+            # Add shaded region for min-max range
+            if "policy_cost_normalized_diff_mean_min" in filtered_agg.columns and "policy_cost_normalized_diff_mean_max" in filtered_agg.columns:
+                axes2[0].fill_between(filtered_agg["dx"], filtered_agg["policy_cost_normalized_diff_mean_min"], 
+                                       filtered_agg["policy_cost_normalized_diff_mean_max"], 
+                                       alpha=0.3, color="green", label="Min-Max range")
+            
+            # Add horizontal line at y=0 for reference
+            axes2[0].axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+            
+            axes2[0].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+            axes2[0].set_ylabel("Normalized cost difference", fontsize=LABEL_SIZE)
+            axes2[0].set_title(f"Policy cost comparison vs dimension", fontsize=TITLE_SIZE)
+            axes2[0].tick_params(axis='both', labelsize=TICK_SIZE)
+            axes2[0].grid(True)
+            axes2[0].legend(fontsize=LEGEND_SIZE)
+            
+            print(f"Policy cost plot shows {len(filtered_agg)} dimensions with ≥{threshold}% boundedness")
+        else:
+            axes2[0].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+                           ha="center", va="center", transform=axes2[0].transAxes, fontsize=LABEL_SIZE)
+            axes2[0].set_title(f"Policy cost comparison vs dimension", fontsize=TITLE_SIZE)
+            print(f"No dimensions found with ≥{threshold}% boundedness for policy cost plot")
+    else:
+        axes2[0].text(0.5, 0.5, "No policy cost data available", 
+                       ha="center", va="center", transform=axes2[0].transAxes, fontsize=LABEL_SIZE)
+        axes2[0].set_title("Policy cost comparison vs dimension", fontsize=TITLE_SIZE)
+    
+    # Plot 2: Value function comparison (normalized difference)
+    if "value_func_normalized_diff_mean_mean" in agg.columns:
+        # Filter dimensions based on boundedness threshold
+        threshold = args.boundedness_threshold
+        filtered_agg = agg[agg["moment_bounded_pct"] >= threshold].copy()
+        
+        if len(filtered_agg) > 0:
+            # Plot the mean line
+            axes2[1].plot(filtered_agg["dx"], filtered_agg["value_func_normalized_diff_mean_mean"], 
+                           marker="o", color="purple", label="Mean normalized difference")
+            # Add shaded region for min-max range
+            if "value_func_normalized_diff_mean_min" in filtered_agg.columns and "value_func_normalized_diff_mean_max" in filtered_agg.columns:
+                axes2[1].fill_between(filtered_agg["dx"], filtered_agg["value_func_normalized_diff_mean_min"], 
+                                       filtered_agg["value_func_normalized_diff_mean_max"], 
+                                       alpha=0.3, color="purple", label="Min-Max range")
+            
+            # Add horizontal line at y=0 for reference
+            axes2[1].axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+            
+            axes2[1].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+            axes2[1].set_ylabel("Normalized V difference", fontsize=LABEL_SIZE)
+            axes2[1].set_title(f"Value function comparison vs dimension", fontsize=TITLE_SIZE)
+            axes2[1].tick_params(axis='both', labelsize=TICK_SIZE)
+            axes2[1].grid(True)
+            axes2[1].legend(fontsize=LEGEND_SIZE)
+            
+            # Print value function summary
+            V_diff_mean = filtered_agg["value_func_normalized_diff_mean_mean"].mean()
+            print(f"\nValue function comparison summary:")
+            print(f"  Average normalized V difference: {V_diff_mean:.4f}")
+            print(f"  Value function plot shows {len(filtered_agg)} dimensions with ≥{threshold}% boundedness")
+        else:
+            axes2[1].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+                           ha="center", va="center", transform=axes2[1].transAxes, fontsize=LABEL_SIZE)
+            axes2[1].set_title(f"Value function comparison vs dimension", fontsize=TITLE_SIZE)
+            print(f"No dimensions found with ≥{threshold}% boundedness for value function plot")
+    else:
+        axes2[1].text(0.5, 0.5, "No value function data available", 
+                       ha="center", va="center", transform=axes2[1].transAxes, fontsize=LABEL_SIZE)
+        axes2[1].set_title("Value function comparison vs dimension", fontsize=TITLE_SIZE)
+    
+    fig2.tight_layout()
+    # Generate filename for figure 2
+    fig2_path = args.plot_dir.replace(".pdf", "_policy_value.pdf")
+    fig2.savefig(fig2_path, dpi=150)
+    print(f"Saved Figure 2 (Policy + Value): {fig2_path}")
+    plt.close(fig2)
+    
+    # ===========================================
+    # FIGURE 3: Policy cost + Value function comparison (with std bands)
+    # ===========================================
+    fig3, axes3 = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Policy cost comparison with std bands
+    if "policy_cost_normalized_diff_mean_mean" in agg.columns:
+        # Filter dimensions based on boundedness threshold
+        threshold = args.boundedness_threshold
+        filtered_agg = agg[agg["moment_bounded_pct"] >= threshold].copy()
+        
+        if len(filtered_agg) > 0:
+            mean_vals = filtered_agg["policy_cost_normalized_diff_mean_mean"]
+            # Plot the mean line
+            axes3[0].plot(filtered_agg["dx"], mean_vals, 
+                           marker="o", color="green", label="Mean")
+            # Add shaded region for mean ± std
+            if "policy_cost_normalized_diff_mean_std" in filtered_agg.columns:
+                std_vals = filtered_agg["policy_cost_normalized_diff_mean_std"]
+                axes3[0].fill_between(filtered_agg["dx"], 
+                                       mean_vals - std_vals, 
+                                       mean_vals + std_vals, 
+                                       alpha=0.3, color="green", label="±1 Std Dev")
+            
+            # Add horizontal line at y=0 for reference
+            axes3[0].axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+            
+            axes3[0].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+            axes3[0].set_ylabel("Normalized cost difference", fontsize=LABEL_SIZE)
+            axes3[0].set_title(f"Policy cost comparison vs dimension", fontsize=TITLE_SIZE)
+            axes3[0].tick_params(axis='both', labelsize=TICK_SIZE)
+            axes3[0].grid(True)
+            axes3[0].legend(fontsize=LEGEND_SIZE)
+        else:
+            axes3[0].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+                           ha="center", va="center", transform=axes3[0].transAxes, fontsize=LABEL_SIZE)
+            axes3[0].set_title(f"Policy cost comparison vs dimension", fontsize=TITLE_SIZE)
+    else:
+        axes3[0].text(0.5, 0.5, "No policy cost data available", 
+                       ha="center", va="center", transform=axes3[0].transAxes, fontsize=LABEL_SIZE)
+        axes3[0].set_title("Policy cost comparison vs dimension", fontsize=TITLE_SIZE)
+    
+    # Plot 2: Value function comparison with std bands
+    if "value_func_normalized_diff_mean_mean" in agg.columns:
+        # Filter dimensions based on boundedness threshold
+        threshold = args.boundedness_threshold
+        filtered_agg = agg[agg["moment_bounded_pct"] >= threshold].copy()
+        
+        if len(filtered_agg) > 0:
+            mean_vals = filtered_agg["value_func_normalized_diff_mean_mean"]
+            # Plot the mean line
+            axes3[1].plot(filtered_agg["dx"], mean_vals, 
+                           marker="o", color="purple", label="Mean")
+            # Add shaded region for mean ± std
+            if "value_func_normalized_diff_mean_std" in filtered_agg.columns:
+                std_vals = filtered_agg["value_func_normalized_diff_mean_std"]
+                axes3[1].fill_between(filtered_agg["dx"], 
+                                       mean_vals - std_vals, 
+                                       mean_vals + std_vals, 
+                                       alpha=0.3, color="purple", label="±1 Std Dev")
+            
+            # Add horizontal line at y=0 for reference
+            axes3[1].axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+            
+            axes3[1].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+            axes3[1].set_ylabel("Normalized V difference", fontsize=LABEL_SIZE)
+            axes3[1].set_title(f"Value function comparison vs dimension", fontsize=TITLE_SIZE)
+            axes3[1].tick_params(axis='both', labelsize=TICK_SIZE)
+            axes3[1].grid(True)
+            axes3[1].legend(fontsize=LEGEND_SIZE)
+        else:
+            axes3[1].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+                           ha="center", va="center", transform=axes3[1].transAxes, fontsize=LABEL_SIZE)
+            axes3[1].set_title(f"Value function comparison vs dimension", fontsize=TITLE_SIZE)
+    else:
+        axes3[1].text(0.5, 0.5, "No value function data available", 
+                       ha="center", va="center", transform=axes3[1].transAxes, fontsize=LABEL_SIZE)
+        axes3[1].set_title("Value function comparison vs dimension", fontsize=TITLE_SIZE)
+    
+    fig3.tight_layout()
+    # Generate filename for figure 3
+    fig3_path = args.plot_dir.replace(".pdf", "_policy_value_std.pdf")
+    fig3.savefig(fig3_path, dpi=150)
+    print(f"Saved Figure 3 (Policy + Value with std bands): {fig3_path}")
+    plt.close(fig3)
+    
+    # ===========================================
+    # FIGURE 4: K matrix difference + Weighted trace difference
+    # ===========================================
+    fig4, axes4 = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: K matrix relative difference (||K_mm - K_lqr||_F / ||K_lqr||_F)
+    if "K_diff_normalized_mean" in agg.columns:
+        # Filter dimensions based on boundedness threshold
+        threshold = args.boundedness_threshold
+        filtered_agg = agg[agg["moment_bounded_pct"] >= threshold].copy()
+        
+        if len(filtered_agg) > 0:
+            mean_vals = filtered_agg["K_diff_normalized_mean"]
+            # Plot the mean line
+            axes4[0].plot(filtered_agg["dx"], mean_vals, 
+                           marker="o", color="darkorange", label="Mean")
+            # Add shaded region for mean ± std
+            if "K_diff_normalized_std" in filtered_agg.columns:
+                std_vals = filtered_agg["K_diff_normalized_std"]
+                axes4[0].fill_between(filtered_agg["dx"], 
+                                       mean_vals - std_vals, 
+                                       mean_vals + std_vals, 
+                                       alpha=0.3, color="darkorange", label="±1 Std Dev")
+            
+            # Add horizontal line at y=0 for reference
+            axes4[0].axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+            
+            axes4[0].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+            axes4[0].set_ylabel("Relative K difference", fontsize=LABEL_SIZE)
+            axes4[0].set_title(f"Gain matrix K: ||K_mm - K_lqr||/||K_lqr||", fontsize=TITLE_SIZE)
+            axes4[0].tick_params(axis='both', labelsize=TICK_SIZE)
+            axes4[0].grid(True)
+            axes4[0].legend(fontsize=LEGEND_SIZE)
+            
+            print(f"K matrix plot shows {len(filtered_agg)} dimensions with ≥{threshold}% boundedness")
+        else:
+            axes4[0].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+                           ha="center", va="center", transform=axes4[0].transAxes, fontsize=LABEL_SIZE)
+            axes4[0].set_title(f"Gain matrix K comparison", fontsize=TITLE_SIZE)
+    else:
+        axes4[0].text(0.5, 0.5, "No K matrix data available", 
+                       ha="center", va="center", transform=axes4[0].transAxes, fontsize=LABEL_SIZE)
+        axes4[0].set_title("Gain matrix K comparison", fontsize=TITLE_SIZE)
+    
+    # Plot 2: Weighted trace difference (using C_val from MM LP direction)
+    if "weighted_trace_diff_mean" in agg.columns:
+        # Filter dimensions based on boundedness threshold
+        threshold = args.boundedness_threshold
+        filtered_agg = agg[agg["moment_bounded_pct"] >= threshold].copy()
+        
+        if len(filtered_agg) > 0:
+            mean_vals = filtered_agg["weighted_trace_diff_mean"]
+            # Plot the mean line
+            axes4[1].plot(filtered_agg["dx"], mean_vals, 
+                           marker="o", color="teal", label="Mean")
+            # Add shaded region for mean ± std
+            if "weighted_trace_diff_std" in filtered_agg.columns:
+                std_vals = filtered_agg["weighted_trace_diff_std"]
+                axes4[1].fill_between(filtered_agg["dx"], 
+                                       mean_vals - std_vals, 
+                                       mean_vals + std_vals, 
+                                       alpha=0.3, color="teal", label="±1 Std Dev")
+            
+            # Add horizontal line at y=0 for reference
+            axes4[1].axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+            
+            axes4[1].set_xlabel("State dimension", fontsize=LABEL_SIZE)
+            axes4[1].set_ylabel("Relative weighted trace diff", fontsize=LABEL_SIZE)
+            axes4[1].set_title(f"Weighted trace: tr(C·Q_mm) vs tr(C·Q_lqr)", fontsize=TITLE_SIZE)
+            axes4[1].tick_params(axis='both', labelsize=TICK_SIZE)
+            axes4[1].grid(True)
+            axes4[1].legend(fontsize=LEGEND_SIZE)
+            
+            print(f"Weighted trace plot shows {len(filtered_agg)} dimensions with ≥{threshold}% boundedness")
+        else:
+            axes4[1].text(0.5, 0.5, f"No dimensions with ≥{threshold}% boundedness", 
+                           ha="center", va="center", transform=axes4[1].transAxes, fontsize=LABEL_SIZE)
+            axes4[1].set_title(f"Weighted trace comparison", fontsize=TITLE_SIZE)
+    else:
+        axes4[1].text(0.5, 0.5, "No weighted trace data available", 
+                       ha="center", va="center", transform=axes4[1].transAxes, fontsize=LABEL_SIZE)
+        axes4[1].set_title("Weighted trace comparison", fontsize=TITLE_SIZE)
+    
+    fig4.tight_layout()
+    # Generate filename for figure 4
+    fig4_path = args.plot_dir.replace(".pdf", "_K_weighted_trace.pdf")
+    fig4.savefig(fig4_path, dpi=150)
+    print(f"Saved Figure 4 (K matrix + Weighted trace): {fig4_path}")
+    plt.close(fig4)
     
     # # Plot 3: Q-value difference
     # q_diff_col = "q_value_diff_mean_mean" if "q_value_diff_mean_mean" in agg.columns else None
@@ -678,6 +1371,5 @@ if __name__ == "__main__":
     #                    ha="center", va="center", transform=axes[1, 1].transAxes)
     #     axes[1, 1].set_title("Q-function value correlation vs dimension")
     
-    plt.tight_layout()
-    plt.savefig(args.plot_dir, dpi=150)
-    print("Saved:", args.out_json, "Figures saved in", args.plot_dir)
+    print(f"\nSaved: {args.out_json}")
+    print(f"Figures saved: {fig1_path}, {fig2_path}, {fig3_path}, {fig4_path}")

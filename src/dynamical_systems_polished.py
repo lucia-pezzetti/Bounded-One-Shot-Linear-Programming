@@ -719,835 +719,401 @@ class cart_pole_v2:
         return L_x + L_u
 
 
-class single_pendulum:
+# All non-cartpole classes removed - keeping only dlqr, cart_pole, and cart_pole_v2
+
+
+
+class point_mass_2d_cubic_drag:
     """
-    Nonlinear torque-actuated pendulum with 2D state (theta, theta_dot).
-    Provides a simpler benchmark than cart-pole while remaining nonlinear.
-    """
-    def __init__(
-        self,
-        m,
-        l,
-        b,
-        delta_t,
-        C,
-        rho,
-        gamma,
-        N,
-        M,
-        g=9.8,
-    ):
-        self.N_u = 1
-        self.N_x = 2
-        self.N = N
-        self.M = M
+    2D point-mass with linear spring to the origin and isotropic cubic damping
+    (quadratic-in-speed drag), discretized with forward Euler.
 
-        self.m = m
-        self.l = l
-        self.b = b  # viscous damping coefficient
-        self.g = g
-        self.delta_t = delta_t
-        self.gamma = gamma
-
-        self.C = C
-        self.rho = rho
-        self.Q = C.T @ C
-        self.R = rho * np.eye(self.N_u)
-
-    # @staticmethod
-    # def _wrap_angle(theta):
-    #     """Wrap angle to [-pi, pi) to measure error around upright."""
-    #     return (theta + np.pi) % (2 * np.pi) - np.pi
-
-    def continuous_dynamics(self, theta, theta_dot, u):
-        """
-        Inverted pendulum dynamics (upright equilibrium at theta=0).
-        theta_ddot = (g/l) * sin(theta) - (b/(m l^2)) * theta_dot + u/(m l^2)
-        
-        Note: Positive sign on gravitational term makes theta=0 an unstable equilibrium,
-        requiring active control to balance upright.
-        """
-        inertia = self.m * (self.l**2)
-        return (
-            (self.g / self.l) * np.sin(theta)  # Positive sign for inverted pendulum
-            - (self.b / inertia) * theta_dot
-            + u / inertia
-        )
-
-    def step(self, x, u, wrap_angles=False):
-        """
-        Forward Euler step. 
-        State x = [theta, theta_dot], control u is torque.
-        
-        Args:
-            x: state vector [theta, theta_dot]
-            u: control input (torque)
-            wrap_angles: if True, wrap angle to [-pi, pi) after integration
-        """
-        theta, theta_dot = np.asarray(x).reshape(-1)
-        u = float(np.asarray(u).reshape(-1)[0])
-
-        theta_ddot = self.continuous_dynamics(theta, theta_dot, u)
-
-        theta_new = theta + self.delta_t * theta_dot
-        if wrap_angles:
-            theta_new = (theta_new + np.pi) % (2 * np.pi) - np.pi
-        theta_dot_new = theta_dot + self.delta_t * theta_ddot
-
-        return np.array([theta_new, theta_dot_new])
-
-    def linearized_system(self, use_backward_euler=False):
-        """
-        Linearization around upright equilibrium (theta = 0).
-        For inverted pendulum, sin(theta) ≈ theta, so gravitational term is positive.
-        """
-        A_c = np.array(
-            [
-                [0.0, 1.0],
-                [(self.g / self.l), -(self.b / (self.m * self.l**2))],  # Positive sign for inverted pendulum
-            ]
-        )
-        B_c = np.array([[0.0], [1.0 / (self.m * self.l**2)]])
-        
-        I = np.eye(self.N_x)
-
-        if use_backward_euler:
-            A_d = inv(I - self.delta_t * A_c)
-            B_d = self.delta_t * A_d @ B_c
-        else:
-            A_d = I + self.delta_t * A_c
-            B_d = self.delta_t * B_c
-
-        return A_d, B_d
-
-    def generate_samples_auxiliary(self, theta_bounds, theta_dot_bounds, u_bounds, n_samples=None):
-        if n_samples is None:
-            n_samples = self.M
-
-        theta_samples = np.random.uniform(*theta_bounds, size=n_samples)
-        theta_dot_samples = np.random.uniform(*theta_dot_bounds, size=n_samples)
-        states = np.column_stack([theta_samples, theta_dot_samples])
-        
-        actions = np.random.uniform(*u_bounds, size=(n_samples, 1))
-        return states, actions
-
-    def generate_samples(
-        self,
-        theta_bounds,
-        theta_dot_bounds,
-        u_bounds,
-        n_samples=None,
-        use_backward_euler=False,
-    ):
-        if n_samples is None:
-            n_samples = self.N
-
-        X, U = self.generate_samples_auxiliary(
-            theta_bounds, theta_dot_bounds, u_bounds, n_samples
-        )
-
-        if use_backward_euler:
-            A_d, B_d = self.linearized_system(use_backward_euler=True)
-            X_plus = (A_d @ X.T).T + (B_d @ U.T).T
-        else:
-            X_plus = np.array([self.step(x, u[0], wrap_angles=True) for x, u in zip(X, U)])
-
-        U_plus = np.random.uniform(*u_bounds, size=(n_samples, 1))
-        return X, U, X_plus, U_plus
-
-    def cost(self, X, U):
-        """
-        Compute cost: x^T Q x + u^T R u where Q is for [theta, theta_dot].
-        """
-        L_x = np.sum(X @ self.Q * X, axis=1)
-        # Use wrapped angle so upright at 0 has the smallest penalty
-        # X_wrapped = X.copy()
-        # X_wrapped[:, 0] = self._wrap_angle(X_wrapped[:, 0])
-        # L_x = np.sum(X_wrapped @ self.Q * X_wrapped, axis=1)
-        
-        if U.ndim == 1:
-            L_u = U @ self.R * U
-        else:
-            L_u = np.sum(U @ self.R * U, axis=1)
-        return L_x + L_u
-
-
-class mountain_car:
-    """
-    Mountain Car system: a car must drive up a hill to reach the goal.
-    
-    State: [position, velocity]
-    - position: in [-1.2, 0.6], goal is at 0.5
-    - velocity: in [-0.07, 0.07]
-    
-    Control: force (continuous) in [-1, 1]
-    
-    Goal: position = 0.5 (top of the hill)
-    Cost: zero at goal, increases quadratically with distance from goal and velocity.
-    """
-    def __init__(
-        self,
-        delta_t,
-        C,
-        rho,
-        gamma,
-        N,
-        M,
-        goal_position=0.5,
-    ):
-        self.N_u = 1
-        self.N_x = 2
-        self.N = N
-        self.M = M
-        self.delta_t = delta_t
-        self.gamma = gamma
-        self.goal_position = goal_position  # Goal position (top of hill)
-        
-        self.C = C
-        self.rho = rho
-        # Cost matrix Q penalizes distance from goal and velocity
-        # Cost = (position - goal)^2 * Q[0,0] + velocity^2 * Q[1,1]
-        self.Q = C.T @ C
-        self.R = rho * np.eye(self.N_u)
-    
-    def continuous_dynamics(self, position, velocity, u):
-        """
-        Mountain car continuous dynamics.
-        
-        position_dot = velocity
-        velocity_dot = -0.0025 * cos(3*position) + 0.001 * u - 0.25 * velocity
-        """
-        position_dot = velocity
-        velocity_dot = -0.0025 * np.cos(3 * position) + 0.001 * u - 0.25 * velocity
-        return position_dot, velocity_dot
-    
-    def step(self, x, u):
-        """
-        Forward Euler step.
-        State x = [position, velocity], control u is force.
-        """
-        position, velocity = np.asarray(x).reshape(-1)
-        u = float(np.asarray(u).reshape(-1)[0])
-        
-        position_dot, velocity_dot = self.continuous_dynamics(position, velocity, u)
-        
-        position_new = position + self.delta_t * position_dot
-        velocity_new = velocity + self.delta_t * velocity_dot
-        
-        # Clip position to valid bounds
-        position_new = np.clip(position_new, -1.2, 0.6)
-        # Clip velocity to valid bounds
-        velocity_new = np.clip(velocity_new, -0.07, 0.07)
-        
-        return np.array([position_new, velocity_new])
-    
-    def linearized_system(self, use_backward_euler=False):
-        """
-        Linearization around goal position (position = goal_position, velocity = 0).
-        """
-        # Linearize around goal: position = goal_position, velocity = 0
-        pos_eq = self.goal_position
-        vel_eq = 0.0
-        
-        # Jacobian of dynamics:
-        # d/dposition [position_dot] = 0
-        # d/dvelocity [position_dot] = 1
-        # d/dposition [velocity_dot] = 0.0025 * 3 * sin(3*position) ≈ 0.0075 * sin(3*goal_position)
-        # d/dvelocity [velocity_dot] = -0.25
-        # d/du [velocity_dot] = 0.001
-        
-        A_c = np.array([
-            [0.0, 1.0],
-            [0.0075 * np.sin(3 * pos_eq), -0.25]
-        ])
-        B_c = np.array([[0.0], [0.001]])
-        
-        I = np.eye(self.N_x)
-        
-        if use_backward_euler:
-            A_d = inv(I - self.delta_t * A_c)
-            B_d = self.delta_t * A_d @ B_c
-        else:
-            A_d = I + self.delta_t * A_c
-            B_d = self.delta_t * B_c
-        
-        return A_d, B_d
-    
-    def generate_samples_auxiliary(self, position_bounds, velocity_bounds, u_bounds, n_samples=None):
-        if n_samples is None:
-            n_samples = self.M
-        
-        position_samples = np.random.uniform(*position_bounds, size=n_samples)
-        velocity_samples = np.random.uniform(*velocity_bounds, size=n_samples)
-        states = np.column_stack([position_samples, velocity_samples])
-        
-        actions = np.random.uniform(*u_bounds, size=(n_samples, 1))
-        return states, actions
-    
-    def generate_samples(
-        self,
-        position_bounds,
-        velocity_bounds,
-        u_bounds,
-        n_samples=None,
-        use_backward_euler=False,
-    ):
-        if n_samples is None:
-            n_samples = self.N
-        
-        X, U = self.generate_samples_auxiliary(
-            position_bounds, velocity_bounds, u_bounds, n_samples
-        )
-        
-        if use_backward_euler:
-            A_d, B_d = self.linearized_system(use_backward_euler=True)
-            X_plus = (A_d @ X.T).T + (B_d @ U.T).T
-        else:
-            X_plus = np.array([self.step(x, u[0]) for x, u in zip(X, U)])
-        
-        U_plus = np.random.uniform(*u_bounds, size=(n_samples, 1))
-        return X, U, X_plus, U_plus
-    
-    def cost(self, X, U):
-        """
-        Compute cost: zero at goal, increases quadratically with distance from goal.
-        Cost = (position - goal)^2 * Q[0,0] + velocity^2 * Q[1,1] + u^2 * R
-        
-        Note: We shift the state so that goal is at origin for cost computation.
-        """
-        # Shift position to make goal at origin
-        X_shifted = X.copy()
-        X_shifted[:, 0] = X[:, 0] - self.goal_position  # position - goal
-        
-        L_x = np.sum(X_shifted @ self.Q * X_shifted, axis=1)
-        
-        if U.ndim == 1:
-            L_u = U @ self.R * U
-        else:
-            L_u = np.sum(U @ self.R * U, axis=1)
-        return L_x + L_u
-
-
-class scalar_cubic:
-    """
-    Scalar system with cubic drift: x_dot = x^3 + u
-    
-    This is a simple nonlinear system that exhibits interesting dynamics.
-    The cubic term makes the system unstable for large |x| values.
-    """
-    def __init__(self, delta_t, C, rho, gamma, N, M):
-        self.N_u = 1
-        self.N_x = 1
-        
-        # sample sizes
-        self.N = N
-        # number of auxiliary samples
-        self.M = M
-        
-        self.delta_t = delta_t
-        self.gamma = gamma
-        
-        self.C = C
-        self.rho = rho
-        self.Q = C.T @ C
-        self.R = rho * np.eye(self.N_u)
-    
-    def continuous_dynamics(self, x, u):
-        """
-        Continuous-time dynamics: x_dot = x^3 + u
-        """
-        return x**3 + u
-    
-    def step(self, x, u):
-        """
-        Forward Euler step.
-        State x is scalar, control u is scalar.
-        x_{t+1} = x_t + dt * (x_t^3 + u_t)
-        
-        Note: The cubic term can cause rapid divergence. No clipping is applied here.
-        Early termination should be used in simulation loops to prevent overflow.
-        """
-        x = float(np.asarray(x).reshape(-1)[0])
-        u = float(np.asarray(u).reshape(-1)[0])
-        
-        # Check for invalid inputs
-        if not np.isfinite(x) or not np.isfinite(u):
-            raise ValueError(f"Invalid input: x={x}, u={u}")
-        
-        x_dot = self.continuous_dynamics(x, u)
-        
-        # Check if derivative is finite
-        if not np.isfinite(x_dot):
-            raise ValueError(f"Non-finite derivative: x={x}, u={u}, x_dot={x_dot}")
-        
-        x_new = x + self.delta_t * x_dot
-        
-        # Check if new state is finite
-        if not np.isfinite(x_new):
-            raise ValueError(f"Non-finite state update: x={x}, u={u}, x_new={x_new}")
-        
-        # No clipping - states are allowed to diverge naturally
-        # Early termination in simulation loops will catch overflow
-        
-        return np.array([x_new])
-    
-    def linearized_system(self, use_backward_euler=False):
-        """
-        Linearization around equilibrium x = 0.
-        At x = 0: d/dx (x^3 + u) = 3*x^2 = 0, so A_c = 0
-        d/du (x^3 + u) = 1, so B_c = 1
-        """
-        A_c = np.array([[0.0]])  # Linearization around x=0
-        B_c = np.array([[1.0]])
-        
-        I = np.eye(self.N_x)
-        
-        if use_backward_euler:
-            A_d = inv(I - self.delta_t * A_c)
-            B_d = self.delta_t * A_d @ B_c
-        else:
-            A_d = I + self.delta_t * A_c
-            B_d = self.delta_t * B_c
-        
-        return A_d, B_d
-    
-    def generate_samples_auxiliary(self, x_bounds, u_bounds, n_samples=None):
-        """
-        Generate auxiliary samples for cost computation.
-        """
-        if n_samples is None:
-            n_samples = self.M
-        
-        X_aux = np.random.uniform(*x_bounds, size=(n_samples, self.N_x))
-        U_aux = np.random.uniform(*u_bounds, size=(n_samples, self.N_u))
-        
-        return X_aux, U_aux
-    
-    def generate_samples(self, x_bounds, u_bounds, n_samples=None):
-        """
-        Generate random state-action samples.
-        """
-        if n_samples is None:
-            n_samples = self.N
-        
-        X, U = self.generate_samples_auxiliary(x_bounds, u_bounds, n_samples)
-        
-        # Compute next states using step function
-        X_plus = np.array([self.step(x, u[0]) for x, u in zip(X, U)])
-        U_plus = np.random.uniform(*u_bounds, size=(n_samples, self.N_u))
-        
-        return X, U, X_plus, U_plus
-    
-    def cost(self, X, U):
-        """
-        Compute quadratic cost: x^T Q x + u^T R u
-        
-        Handles large states gracefully by clipping cost to prevent overflow.
-        """
-        # Check for invalid states
-        if np.any(~np.isfinite(X)):
-            return np.full(X.shape[0], np.inf)
-        
-        L_x = np.sum(X @ self.Q * X, axis=1)
-        
-        # Check for invalid controls
-        if np.any(~np.isfinite(U)):
-            return np.full(X.shape[0], np.inf)
-        
-        if U.ndim == 1:
-            L_u = U @ self.R * U
-        else:
-            L_u = np.sum(U @ self.R * U, axis=1)
-        
-        total_cost = L_x + L_u
-        
-        # Replace any non-finite costs with infinity
-        total_cost = np.where(np.isfinite(total_cost), total_cost, np.inf)
-        
-        return total_cost
-
-
-class coupled_cubic:
-    """
-    Multidimensional coupled cubic drift system:
-
-        x_dot = A @ (x^{\circ 3}) + B @ u
-
-    where (x^{\circ 3})_i = x_i^3 (elementwise cube).
-    Discretization (forward Euler):
-        x_{t+1} = x_t + dt * (A @ (x_t^{\circ 3}) + B @ u_t)
-
-    Notes:
-      - Linearization around x=0 gives A_c = 0 (because derivative of x^3 at 0 is 0),
-        and B_c = B.
-      - This model can blow up quickly for large |x|; step() includes finite checks
-        similar to scalar_cubic.
-    """
-    def __init__(self, A, B, delta_t, C, rho, gamma, N, M):
-        self.A = np.asarray(A, dtype=float)
-        self.B = np.asarray(B, dtype=float)
-
-        self.N_x = self.A.shape[0]
-        self.N_u = self.B.shape[1]
-
-        assert self.A.shape == (self.N_x, self.N_x), "A must be (N_x, N_x)"
-        assert self.B.shape[0] == self.N_x, "B must have shape (N_x, N_u)"
-
-        self.delta_t = float(delta_t)
-        self.gamma = float(gamma)
-
-        self.N = N
-        self.M = M
-
-        self.C = np.asarray(C, dtype=float)
-        self.rho = float(rho)
-
-        self.Q = self.C.T @ self.C
-        self.R = self.rho * np.eye(self.N_u)
-
-    def continuous_dynamics(self, x, u):
-        """
-        Continuous-time dynamics: x_dot = A @ (x^{\circ 3}) + B @ u
-        """
-        x = np.asarray(x, dtype=float).reshape(-1)
-        u = np.asarray(u, dtype=float).reshape(-1)
-
-        # broadcast scalar u if needed (handy when N_u>1 but you pass scalar)
-        if u.size == 0:
-            u = np.zeros(self.N_u)
-        if u.size == 1 and self.N_u > 1:
-            u = np.full(self.N_u, float(u.item()))
-
-        x_cubed = x ** 3  # elementwise
-        return self.A @ x_cubed + self.B @ u
-
-    def step(self, x, u, wrap_angles=False):
-        """
-        Forward Euler step:
-          x_next = x + dt * (A @ (x^3) + B @ u)
-        
-        Args:
-            x: state vector
-            u: control input
-            wrap_angles: (deprecated, kept for compatibility) no angle wrapping for coupled_cubic
-        """
-        x = np.asarray(x, dtype=float).reshape(-1)
-        u = np.asarray(u, dtype=float).reshape(-1)
-
-        if u.size == 0:
-            u = np.zeros(self.N_u)
-        if u.size == 1 and self.N_u > 1:
-            u = np.full(self.N_u, float(u.item()))
-
-        # finite checks
-        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(u)):
-            raise ValueError(f"Invalid input: x={x}, u={u}")
-
-        x_dot = self.continuous_dynamics(x, u)
-
-        if not np.all(np.isfinite(x_dot)):
-            raise ValueError(f"Non-finite derivative: x={x}, u={u}, x_dot={x_dot}")
-
-        x_next = x + self.delta_t * x_dot
-
-        if not np.all(np.isfinite(x_next)):
-            raise ValueError(f"Non-finite state update: x={x}, u={u}, x_next={x_next}")
-
-        return x_next
-
-    def linearized_system(self, use_backward_euler=False):
-        """
-        Linearization around x = 0:
-
-          x_dot = A @ (x^3) + B @ u
-        d/dx at 0: 0  -> A_c = 0
-        d/du: B       -> B_c = B
-
-        Discretize:
-          forward Euler: A_d = I + dt*A_c = I,  B_d = dt*B
-          backward Euler: A_d = (I - dt*A_c)^(-1) = I, B_d = dt*B
-        """
-        A_c = np.zeros((self.N_x, self.N_x))
-        B_c = self.B.copy()
-        I = np.eye(self.N_x)
-
-        if use_backward_euler:
-            A_d = inv(I - self.delta_t * A_c)  # = I
-            B_d = self.delta_t * A_d @ B_c     # = dt*B
-        else:
-            A_d = I + self.delta_t * A_c       # = I
-            B_d = self.delta_t * B_c
-
-        return A_d, B_d
-
-    def generate_samples_auxiliary(self, x_bounds, u_bounds, n_samples=None):
-        """
-        x_bounds: (low, high) or arrays broadcastable to (N_x,)
-        u_bounds: (low, high) or arrays broadcastable to (N_u,)
-        """
-        if n_samples is None:
-            n_samples = self.M
-
-        x_low, x_high = x_bounds
-        u_low, u_high = u_bounds
-
-        X = np.random.uniform(x_low, x_high, size=(n_samples, self.N_x))
-        U = np.random.uniform(u_low, u_high, size=(n_samples, self.N_u))
-        return X, U
-
-    def generate_samples(self, x_bounds, u_bounds, n_samples=None):
-        if n_samples is None:
-            n_samples = self.N
-
-        X, U = self.generate_samples_auxiliary(x_bounds, u_bounds, n_samples)
-
-        # Next states from nonlinear step
-        X_plus = np.array([self.step(x, u) for x, u in zip(X, U)])
-        U_plus = np.random.uniform(u_bounds[0], u_bounds[1], size=(n_samples, self.N_u))
-        return X, U, X_plus, U_plus
-
-    def cost(self, X, U):
-        """
-        Quadratic cost: x^T Q x + u^T R u
-        """
-        X = np.asarray(X, dtype=float)
-        U = np.asarray(U, dtype=float)
-
-        if np.any(~np.isfinite(X)) or np.any(~np.isfinite(U)):
-            return np.full(X.shape[0], np.inf)
-
-        L_x = np.sum(X @ self.Q * X, axis=1)
-        L_u = np.sum(U @ self.R * U, axis=1) if U.ndim > 1 else (U @ self.R * U)
-        total = L_x + L_u
-        return np.where(np.isfinite(total), total, np.inf)
-
-
-import numpy as np
-from scipy.linalg import inv
-
-class ball_plate:
-    """
-    Ball-on-plate discrete-time model (as in the provided figure).
+    Continuous-time model:
+        p_dot = v
+        v_dot = -(k/m) p - (c/m) ||v||^2 v + (1/m) u
 
     State:
-        x = [s_x, v_x, s_y, v_y]^T
-    Control:
-        u = [alpha, beta]^T
+        x = [p_x, p_y, v_x, v_y] in R^4
 
-    Parameters (per figure):
-        theta_I := mg / (m + I/r^2)
-        theta_s := mu_s * m * g
-        theta_c := -(m*g / v_s) * (mu_s - mu_c)
-
-    Discrete-time dynamics:
-        x_{t+1} = A_d x_t + T_s * f(x_t, u_t)
-
-    where:
-        A_d = [[1, T_s, 0, 0],
-               [0, 1,   0, 0],
-               [0, 0,   1, T_s],
-               [0, 0,   0, 1]]
-
-        f(x,u) = [0,
-                  theta_I*beta + theta_s*cos(alpha)*cos(beta) + theta_c*v_x*cos(alpha)*cos(beta),
-                  0,
-                  theta_I*alpha + theta_s*cos(alpha)*cos(beta) + theta_c*v_y*cos(alpha)*cos(beta)]
+    Input:
+        u = [u_x, u_y] in R^2
     """
 
-    def __init__(
-        self,
-        T_s,
-        C,
-        rho,
-        gamma,
-        N,
-        M,
-        # physical params
-        m=0.258,
-        g=9.8,
-        mu_s=0.12,
-        mu_c=0.0045,
-        v_s=0.01,
-        # inertia ratio term (I/r^2). If unknown, set to 0.0 and theta_I becomes g.
-        I_over_r2=0.0,
-    ):
-        self.N_x = 4
+    def __init__(self, m=2.0, k=5.0, c=1.2, delta_t=0.02, C=None, rho=1.0, gamma=0.99, N=0, M=0):
         self.N_u = 2
+        self.N_x = 4
 
-        # sampling sizes
+        # sample sizes (kept for compatibility with existing pipeline)
         self.N = N
         self.M = M
 
-        # time
-        self.T_s = float(T_s)
-        self.gamma = float(gamma)
+        # parameters
+        self.m = float(m)
+        self.k = float(k)
+        self.c = float(c)
+        self.delta_t = float(delta_t)
 
-        # cost
-        self.C = np.asarray(C, dtype=float)
+        # cost / discount params (used by PolicyExtractor and other utilities)
+        if C is None:
+            self.C = np.eye(self.N_x)
+        else:
+            self.C = np.asarray(C)
         self.rho = float(rho)
+        self.gamma = float(gamma)
+        
+        # Cost matrices for LQR and cost computation
         self.Q = self.C.T @ self.C
         self.R = self.rho * np.eye(self.N_u)
 
-        # physical params
-        self.m = float(m)
-        self.g = float(g)
-        self.mu_s = float(mu_s)
-        self.mu_c = float(mu_c)
-        self.v_s = float(v_s)
-        self.I_over_r2 = float(I_over_r2)
-
-        # derived parameters (per figure)
-        self.theta_I = (self.m * self.g) / (self.m + self.I_over_r2)
-        self.theta_s = self.mu_s * self.m * self.g
-        self.theta_c = -(self.m * self.g / self.v_s) * (self.mu_s - self.mu_c)
-
-        # fixed linear part (double integrator in x and y)
-        Ts = self.T_s
-        self.A_d = np.array(
-            [
-                [1.0, Ts, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, Ts],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=float,
-        )
-
-    def continuous_like_term(self, x, u):
-        """
-        Returns f(x,u) used in the discrete update:
-            x_{t+1} = A_d x_t + T_s * f(x_t, u_t)
-        """
-        x = np.asarray(x, dtype=float).reshape(-1)
-        u = np.asarray(u, dtype=float).reshape(-1)
-
-        if x.size != self.N_x:
-            raise ValueError(f"x must have shape ({self.N_x},), got {x.shape}")
-        if u.size != self.N_u:
-            raise ValueError(f"u must have shape ({self.N_u},), got {u.shape}")
-
-        s_x, v_x, s_y, v_y = x
-        alpha, beta = u
-
-        cos_term = np.cos(alpha) * np.cos(beta)
-
-        a_x = self.theta_I * beta + self.theta_s * cos_term + self.theta_c * v_x * cos_term
-        a_y = self.theta_I * alpha + self.theta_s * cos_term + self.theta_c * v_y * cos_term
-
-        return np.array([0.0, a_x, 0.0, a_y], dtype=float)
-
     def step(self, x, u, wrap_angles=False):
-        """
-        One discrete step:
-            x_{t+1} = A_d x_t + T_s * f(x_t, u_t)
-        
-        Args:
-            x: state vector [s_x, v_x, s_y, v_y]
-            u: control input [alpha, beta]
-            wrap_angles: (deprecated, kept for compatibility) no angle wrapping for ball_plate
-        """
+        """One forward-Euler step."""
         x = np.asarray(x, dtype=float).reshape(-1)
+        if x.size != 4:
+            raise ValueError(f"Expected state dimension 4, got {x.size}")
         u = np.asarray(u, dtype=float).reshape(-1)
+        if u.size == 1:
+            # allow scalar broadcast (for quick tests); apply to both axes
+            u = np.array([float(u.item()), float(u.item())], dtype=float)
+        if u.size != 2:
+            raise ValueError(f"Expected input dimension 2, got {u.size}")
 
-        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(u)):
-            raise ValueError(f"Invalid input: x={x}, u={u}")
+        p = x[:2]
+        v = x[2:]
 
-        f = self.continuous_like_term(x, u)
-        x_next = self.A_d @ x + self.T_s * f
+        # dynamics
+        p_dot = v
+        v_norm_sq = float(v @ v)
+        v_dot = -(self.k / self.m) * p - (self.c / self.m) * v_norm_sq * v + (1.0 / self.m) * u
 
-        if not np.all(np.isfinite(x_next)):
-            raise ValueError(f"Non-finite state update: x={x}, u={u}, x_next={x_next}")
-
+        x_next = np.empty_like(x)
+        x_next[:2] = p + self.delta_t * p_dot
+        x_next[2:] = v + self.delta_t * v_dot
         return x_next
 
     def linearized_system(self, use_backward_euler=False):
         """
-        Linearization around (x=0, u=0). Using cos(0)=1.
+        Discrete-time linearization around the origin.
 
-        From:
-            v_x^+ = v_x + T_s*(theta_I*beta + theta_s + theta_c*v_x)
-            v_y^+ = v_y + T_s*(theta_I*alpha + theta_s + theta_c*v_y)
+        At v=0, the cubic damping has zero Jacobian, so the continuous-time
+        linearization is:
+            p_dot = v
+            v_dot = -(k/m) p + (1/m) u
 
-        The constant theta_s term is an offset, not represented in (A,B).
-        This function returns (A_lin, B_lin) only.
-
-        A_lin:
-            s_x^+ = s_x + T_s*v_x
-            v_x^+ = (1 + T_s*theta_c)*v_x
-            s_y^+ = s_y + T_s*v_y
-            v_y^+ = (1 + T_s*theta_c)*v_y
-
-        B_lin (u=[alpha, beta]):
-            v_x^+ depends on beta: +T_s*theta_I
-            v_y^+ depends on alpha: +T_s*theta_I
+        Returns:
+            A_d, B_d : discrete-time matrices
         """
-        Ts = self.T_s
-        A_lin = np.array(
-            [
-                [1.0, Ts, 0.0, 0.0],
-                [0.0, 1.0 + Ts * self.theta_c, 0.0, 0.0],
-                [0.0, 0.0, 1.0, Ts],
-                [0.0, 0.0, 0.0, 1.0 + Ts * self.theta_c],
-            ],
-            dtype=float,
-        )
+        I2 = np.eye(2)
+        Z2 = np.zeros((2, 2))
+        A_c = np.block([[Z2, I2],
+                        [-(self.k / self.m) * I2, Z2]])
+        B_c = np.vstack([Z2, (1.0 / self.m) * I2])
 
-        # u = [alpha, beta]
-        B_lin = np.array(
-            [
-                [0.0, 0.0],
-                [0.0, Ts * self.theta_I],  # beta influences v_x
-                [0.0, 0.0],
-                [Ts * self.theta_I, 0.0],  # alpha influences v_y
-            ],
-            dtype=float,
-        )
+        dt = self.delta_t
+        if use_backward_euler:
+            # x_{k+1} = x_k + dt*(A_c x_{k+1} + B_c u_k)
+            # => (I - dt A_c) x_{k+1} = x_k + dt B_c u_k
+            I = np.eye(self.N_x)
+            A_d = np.linalg.inv(I - dt * A_c)
+            B_d = A_d @ (dt * B_c)
+        else:
+            A_d = np.eye(self.N_x) + dt * A_c
+            B_d = dt * B_c
+        return A_d, B_d
 
-        # This system is already discrete, so backward/forward euler doesn't apply here.
-        # We keep the arg only for interface consistency.
-        return A_lin, B_lin
-
-    def generate_samples_auxiliary(self, x_bounds, u_bounds, n_samples=None):
+    def generate_samples(self, p_bounds, v_bounds, u_bounds, n_samples):
         """
-        x_bounds: (low, high) scalars or arrays broadcastable to (4,)
-        u_bounds: (low, high) scalars or arrays broadcastable to (2,)
-        """
-        if n_samples is None:
-            n_samples = self.M
+        Generate state transition samples (x, u, x_plus, u_plus).
 
-        x_low, x_high = x_bounds
+        Args:
+            p_bounds: tuple (low, high) for each position component
+            v_bounds: tuple (low, high) for each velocity component
+            u_bounds: tuple (low, high) for each control component
+            n_samples: int
+
+        Returns:
+            X: shape (n_samples, 4) - current states
+            U: shape (n_samples, 2) - current controls
+            X_plus: shape (n_samples, 4) - next states
+            U_plus: shape (n_samples, 2) - next controls (random)
+        """
+        p_low, p_high = p_bounds
+        v_low, v_high = v_bounds
         u_low, u_high = u_bounds
 
-        X = np.random.uniform(x_low, x_high, size=(n_samples, self.N_x))
-        U = np.random.uniform(u_low, u_high, size=(n_samples, self.N_u))
+        X = np.zeros((n_samples, self.N_x))
+        U = np.zeros((n_samples, self.N_u))
+
+        X[:, 0:2] = np.random.uniform(p_low, p_high, size=(n_samples, 2))
+        X[:, 2:4] = np.random.uniform(v_low, v_high, size=(n_samples, 2))
+        U[:, 0:2] = np.random.uniform(u_low, u_high, size=(n_samples, 2))
+        
+        # Compute next states using step function
+        X_plus = np.array([self.step(x, u, wrap_angles=False) for x, u in zip(X, U)])
+        
+        # Generate random next actions
+        U_plus = np.random.uniform(u_low, u_high, size=(n_samples, self.N_u))
+        
+        return X, U, X_plus, U_plus
+
+    def generate_samples_auxiliary(self, p_bounds, v_bounds, u_bounds, n_samples):
+        """
+        Generate auxiliary samples (x, u) without next states.
+        Used for cost computation in the LP formulation.
+        
+        Args:
+            p_bounds: tuple (low, high) for each position component
+            v_bounds: tuple (low, high) for each velocity component
+            u_bounds: tuple (low, high) for each control component
+            n_samples: int
+
+        Returns:
+            X: shape (n_samples, 4) - states
+            U: shape (n_samples, 2) - controls
+        """
+        p_low, p_high = p_bounds
+        v_low, v_high = v_bounds
+        u_low, u_high = u_bounds
+
+        X = np.zeros((n_samples, self.N_x))
+        U = np.zeros((n_samples, self.N_u))
+
+        X[:, 0:2] = np.random.uniform(p_low, p_high, size=(n_samples, 2))
+        X[:, 2:4] = np.random.uniform(v_low, v_high, size=(n_samples, 2))
+        U[:, 0:2] = np.random.uniform(u_low, u_high, size=(n_samples, 2))
+        
         return X, U
-
-    def generate_samples(self, x_bounds, u_bounds, n_samples=None):
+    
+    def cost(self, X, U):
         """
-        Returns: X, U, X_plus, U_plus
+        Compute quadratic cost using Q and R matrices: L = x^T Q x + u^T R u
+        
+        Args:
+            X: array, shape (batch, N_x) - states
+            U: array, shape (batch, N_u) - controls
+            
+        Returns:
+            cost: array, shape (batch,) - cost per sample
         """
-        if n_samples is None:
-            n_samples = self.N
+        # State cost: x^T Q x
+        L_x = np.sum(X @ self.Q * X, axis=1)
+        
+        # Control cost: u^T R u
+        if U.ndim == 1:
+            L_u = U @ self.R * U
+        else:
+            L_u = np.sum(U @ self.R * U, axis=1)
+        
+        return L_x + L_u
 
-        X, U = self.generate_samples_auxiliary(x_bounds, u_bounds, n_samples)
+import numpy as np
 
-        X_plus = np.array([self.step(x, u) for x, u in zip(X, U)])
-        U_plus = np.random.uniform(u_bounds[0], u_bounds[1], size=(n_samples, self.N_u))
+
+class point_mass_cubic_drag:
+    """
+    nD point-mass with linear spring to the origin and isotropic cubic damping
+    (quadratic-in-speed drag), discretized with forward Euler.
+
+    Continuous-time model:
+        p_dot = v
+        v_dot = -(k/m) p - (c/m) ||v||^2 v + (1/m) B u
+
+    State:
+        x = [p, v] in R^(2n), with p,v in R^n
+
+    Input:
+        u in R^m (default m=n). If m=n and B = I, the system is fully actuated.
+    """
+
+    def __init__(
+        self,
+        n=2,                  # position/velocity dimension
+        m_u=None,             # input dimension (default: n)
+        B=None,               # input map (n x m_u). If None -> identity when m_u==n
+        mass=2.0,
+        k=5.0,
+        c=1.2,
+        delta_t=0.02,
+        C=None,
+        rho=1.0,
+        gamma=0.99,
+        N=0,
+        M=0,
+    ):
+        # dimensions
+        self.n = int(n)
+        if self.n <= 0:
+            raise ValueError("n must be a positive integer.")
+        self.N_x = 2 * self.n
+
+        self.N_u = int(self.n if m_u is None else m_u)
+        if self.N_u <= 0:
+            raise ValueError("m_u must be a positive integer.")
+
+        # input map
+        if B is None:
+            if self.N_u != self.n:
+                raise ValueError("If B is None, you must set m_u=n (fully actuated) or provide B.")
+            self.B = np.eye(self.n)
+        else:
+            self.B = np.asarray(B, dtype=float)
+            if self.B.shape != (self.n, self.N_u):
+                raise ValueError(f"B must have shape ({self.n}, {self.N_u}), got {self.B.shape}")
+
+        # sample sizes (compatibility with existing pipeline)
+        self.N = N
+        self.M = M
+
+        # parameters
+        self.m = float(mass)
+        self.k = float(k)
+        self.c = float(c)
+        self.delta_t = float(delta_t)
+
+        # cost / discount params
+        if C is None:
+            self.C = np.eye(self.N_x)
+        else:
+            self.C = np.asarray(C, dtype=float)
+            if self.C.shape[1] != self.N_x:
+                raise ValueError(f"C must have {self.N_x} columns (got {self.C.shape}).")
+
+        self.rho = float(rho)
+        self.gamma = float(gamma)
+
+        # Cost matrices for LQR and cost computation
+        self.Q = self.C.T @ self.C
+        self.R = self.rho * np.eye(self.N_u)
+
+    def _validate_x_u(self, x, u):
+        x = np.asarray(x, dtype=float).reshape(-1)
+        if x.size != self.N_x:
+            raise ValueError(f"Expected state dimension {self.N_x}, got {x.size}")
+
+        u = np.asarray(u, dtype=float).reshape(-1)
+
+        # allow scalar broadcast for quick tests
+        if u.size == 1:
+            u = np.full(self.N_u, float(u.item()), dtype=float)
+
+        if u.size != self.N_u:
+            raise ValueError(f"Expected input dimension {self.N_u}, got {u.size}")
+
+        return x, u
+
+    def step(self, x, u, wrap_angles=False):
+        """One forward-Euler step."""
+        x, u = self._validate_x_u(x, u)
+
+        p = x[: self.n]
+        v = x[self.n :]
+
+        # dynamics
+        p_dot = v
+        v_norm_sq = float(v @ v)  # ||v||^2 (scalar)
+        Bu = self.B @ u           # map to R^n
+
+        v_dot = -(self.k / self.m) * p - (self.c / self.m) * v_norm_sq * v + (1.0 / self.m) * Bu
+
+        x_next = np.empty_like(x)
+        x_next[: self.n] = p + self.delta_t * p_dot
+        x_next[self.n :] = v + self.delta_t * v_dot
+        return x_next
+
+    def linearized_system(self, use_backward_euler=False):
+        """
+        Discrete-time linearization around the origin.
+
+        At v=0, the cubic damping has zero Jacobian, so the continuous-time linearization is:
+            p_dot = v
+            v_dot = -(k/m) p + (1/m) B u
+
+        Returns:
+            A_d, B_d : discrete-time matrices with shapes
+                       A_d: (2n, 2n), B_d: (2n, m_u)
+        """
+        In = np.eye(self.n)
+        Zn = np.zeros((self.n, self.n))
+
+        A_c = np.block([[Zn, In],
+                        [-(self.k / self.m) * In, Zn]])
+
+        B_c = np.vstack([np.zeros((self.n, self.N_u)), (1.0 / self.m) * self.B])
+
+        dt = self.delta_t
+        if use_backward_euler:
+            I = np.eye(self.N_x)
+            A_d = np.linalg.inv(I - dt * A_c)
+            B_d = A_d @ (dt * B_c)
+        else:
+            A_d = np.eye(self.N_x) + dt * A_c
+            B_d = dt * B_c
+
+        return A_d, B_d
+
+    def generate_samples(self, p_bounds, v_bounds, u_bounds, n_samples):
+        """
+        Generate state transition samples (x, u, x_plus, u_plus).
+
+        Bounds are tuples (low, high) applied componentwise.
+        """
+        p_low, p_high = p_bounds
+        v_low, v_high = v_bounds
+        u_low, u_high = u_bounds
+
+        X = np.zeros((n_samples, self.N_x))
+        U = np.zeros((n_samples, self.N_u))
+
+        X[:, : self.n] = np.random.uniform(p_low, p_high, size=(n_samples, self.n))
+        X[:, self.n :] = np.random.uniform(v_low, v_high, size=(n_samples, self.n))
+        U[:, :] = np.random.uniform(u_low, u_high, size=(n_samples, self.N_u))
+
+        X_plus = np.array([self.step(x, u, wrap_angles=False) for x, u in zip(X, U)])
+        U_plus = np.random.uniform(u_low, u_high, size=(n_samples, self.N_u))
 
         return X, U, X_plus, U_plus
 
+    def generate_samples_auxiliary(self, p_bounds, v_bounds, u_bounds, n_samples):
+        """
+        Generate auxiliary samples (x, u) without next states.
+        Used for cost computation in the LP formulation.
+        """
+        p_low, p_high = p_bounds
+        v_low, v_high = v_bounds
+        u_low, u_high = u_bounds
+
+        X = np.zeros((n_samples, self.N_x))
+        U = np.zeros((n_samples, self.N_u))
+
+        X[:, : self.n] = np.random.uniform(p_low, p_high, size=(n_samples, self.n))
+        X[:, self.n :] = np.random.uniform(v_low, v_high, size=(n_samples, self.n))
+        U[:, :] = np.random.uniform(u_low, u_high, size=(n_samples, self.N_u))
+
+        return X, U
+
     def cost(self, X, U):
         """
-        Quadratic cost: x^T Q x + u^T R u
+        Quadratic cost:
+            L = x^T Q x + u^T R u
+
+        Args:
+            X: (batch, N_x) or (N_x,)
+            U: (batch, N_u) or (N_u,)
+        Returns:
+            (batch,) costs or scalar
         """
         X = np.asarray(X, dtype=float)
         U = np.asarray(U, dtype=float)
 
-        if np.any(~np.isfinite(X)) or np.any(~np.isfinite(U)):
-            return np.full(X.shape[0], np.inf)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        if U.ndim == 1:
+            U = U.reshape(1, -1)
 
-        L_x = np.sum(X @ self.Q * X, axis=1)
-        L_u = np.sum(U @ self.R * U, axis=1) if U.ndim > 1 else (U @ self.R * U)
+        if X.shape[1] != self.N_x:
+            raise ValueError(f"X must have {self.N_x} columns, got {X.shape}")
+        if U.shape[1] != self.N_u:
+            raise ValueError(f"U must have {self.N_u} columns, got {U.shape}")
 
-        total = L_x + L_u
-        return np.where(np.isfinite(total), total, np.inf)
+        L_x = np.sum((X @ self.Q) * X, axis=1)
+        L_u = np.sum((U @ self.R) * U, axis=1)
+        return L_x + L_u

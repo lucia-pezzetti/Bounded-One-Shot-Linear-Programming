@@ -130,7 +130,11 @@ def run_one(seed, N, dx, du, M_offline=DEFAULT_M_OFFLINE, use_scaling=True, regu
             mm_policy = None
 
     # Identity baseline
-    status_id = solve_identity_Q(P_z, P_z_next, L_xu, N, gamma)
+    identity_result = solve_identity_Q(P_z, P_z_next, L_xu, N, gamma)
+    if isinstance(identity_result, tuple):
+        status_id, _ = identity_result
+    else:
+        status_id = identity_result
 
     # Generate test states (use provided test_states or generate new ones)
     if test_states is None:
