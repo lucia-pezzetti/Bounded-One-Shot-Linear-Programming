@@ -236,7 +236,7 @@ def compare_policy_costs(A, B, C_cost, rho, gamma, Q_learned, poly, dx, du, n_te
     mm_costs = []
     lqr_success = []
     mm_success = []
-
+    
     for i in range(n_test_states):
         x0 = test_states[i]
         
@@ -280,8 +280,12 @@ def compare_policy_costs(A, B, C_cost, rho, gamma, Q_learned, poly, dx, du, n_te
             if np.linalg.norm(x_current) < 1e-3:
                 break
         
-        # print(f"lqr_cost: {lqr_cost}")
-
+        lqr_costs.append(lqr_cost if lqr_succ else np.inf)
+        lqr_success.append(lqr_succ)
+    
+    for i in range(n_test_states):
+        x0 = test_states[i]
+        
         # Simulate MM policy
         x_current = x0.copy()
         mm_cost = 0.0
@@ -322,11 +326,7 @@ def compare_policy_costs(A, B, C_cost, rho, gamma, Q_learned, poly, dx, du, n_te
             if np.linalg.norm(x_current) < 1e-3:
                 break
         
-        # print(f"mm_cost: {mm_cost}")
-
-        lqr_costs.append(lqr_cost if lqr_succ else np.inf)
         mm_costs.append(mm_cost if mm_succ else np.inf)
-        lqr_success.append(lqr_succ)
         mm_success.append(mm_succ)
     
     # Compute comparison metrics
@@ -445,6 +445,42 @@ def compare_policy_costs(A, B, C_cost, rho, gamma, Q_learned, poly, dx, du, n_te
     metrics["K_lqr_frob"] = K_lqr_frob
     metrics["K_mm_frob"] = np.linalg.norm(K_mm, 'fro')
     
+    # -------------------------
+    # Closed-loop stability check for MM policy
+    # For discrete-time: stable iff all eigenvalues of (A + B @ K_mm) have |λ| < 1
+    # -------------------------
+    A_cl_mm = A + B @ K_mm  # Closed-loop system matrix with MM policy
+    eigs_mm = np.linalg.eigvals(A_cl_mm)
+    spectral_radius_mm = np.max(np.abs(eigs_mm))
+    is_stable_mm = spectral_radius_mm < 1.0
+    
+    # Also check LQR stability (should always be stable)
+    A_cl_lqr = A - B @ K_lqr  # Note: LQR uses u = -K_lqr @ x
+    eigs_lqr = np.linalg.eigvals(A_cl_lqr)
+    spectral_radius_lqr = np.max(np.abs(eigs_lqr))
+    is_stable_lqr = spectral_radius_lqr < 1.0
+    
+    metrics["mm_spectral_radius"] = spectral_radius_mm
+    metrics["mm_is_stable"] = is_stable_mm
+    metrics["lqr_spectral_radius"] = spectral_radius_lqr
+    metrics["lqr_is_stable"] = is_stable_lqr
+    
+    # Save complete K matrices (convert to nested lists for JSON serialization)
+    # Note: LQR effective gain is -K_lqr, MM effective gain is K_mm
+    metrics["K_lqr_matrix"] = K_lqr.tolist()  # Shape: (du, dx)
+    metrics["K_mm_matrix"] = K_mm.tolist()    # Shape: (du, dx)
+    
+    # Also save the closed-loop eigenvalues for debugging
+    metrics["mm_eigenvalues_real"] = np.real(eigs_mm).tolist()
+    metrics["mm_eigenvalues_imag"] = np.imag(eigs_mm).tolist()
+    metrics["lqr_eigenvalues_real"] = np.real(eigs_lqr).tolist()
+    metrics["lqr_eigenvalues_imag"] = np.imag(eigs_lqr).tolist()
+    
+    if not is_stable_mm:
+        print(f"    WARNING: MM closed-loop is UNSTABLE (spectral radius = {spectral_radius_mm:.4f})")
+        # Print the eigenvalues for debugging
+        print(f"    MM eigenvalues magnitudes: {np.abs(eigs_mm)}")
+    
     return metrics
 
 
@@ -547,7 +583,6 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
     Two-stage approach for general linear systems (features on [x,u]).
     Returns: (status_stage2, status_stage1, Q_learned, C_val, E_Q_learned, mu)
     """
-
     d = P_z.shape[1]
 
     # -------------------------
@@ -574,29 +609,30 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
 
     constraints = [
         moment_match == 0,
-        # cp.sum(mu_var) == 1,
-        cp.sum(lambda_var) == 1,
+        cp.sum(lambda_var) == 1
     ]
     
-    # Objective: make C ≈ I without materializing dense arrays
-    I_d = cp.Constant(sparse.eye(d, format="csr"))
-    C_approx = sum_PyPyT
-    # objective = cp.Minimize(cp.norm(C_approx - I_d, "fro"))
     objective = cp.Minimize(cp.norm(moment_match, "fro"))
 
     prob = cp.Problem(objective, constraints)
+    
     mosek_params = {
         "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-9,
         "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-9,
         "MSK_DPAR_INTPNT_TOL_REL_GAP": 1e-9,
         "MSK_IPAR_INTPNT_BASIS": 1
     }
-    prob.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
-    status1 = prob.status
+    try:
+        prob.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
+        status1 = prob.status
+    except Exception as e:
+        print(f"    MOSEK failed in Stage 1: {e}")
+        return "solver_error", "solver_error", None, None, None, None
 
     if status1 not in ("optimal", "optimal_inaccurate"):
         return "failed_stage1", status1, None, None, None, None
 
+    # Compute C_val
     mu = mu_var.value
     # C_val = P_y^T Diag(mu) P_y (reuse the same efficient row-scaling form)
     # C_val = (P_y.T @ (mu[:, None] * P_y))
@@ -608,9 +644,10 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
     # Stage 2 (LP):  maximize trace(C_val @ Q)
     # s.t. forall i:  trace(Q @ (p_i p_i^T - γ p^+_i p^+_i^T)) <= ℓ(x_i,u_i)
     # -------------------------
-    Q    = cp.Variable((d, d))
+    Q = cp.Variable((d, d))
 
     cons = []
+    
     for i in range(N):
         p = P_z[i]
         pn = P_z_next[i]
@@ -625,20 +662,24 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
         
     obj = cp.Maximize(cp.sum(terms))
     prob_lp = cp.Problem(obj, cons)
+    
     mosek_params = {
         "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-9,
         "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-9,
         "MSK_DPAR_INTPNT_TOL_REL_GAP": 1e-9,
         "MSK_IPAR_INTPNT_BASIS": 1
     }
-    prob_lp.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
-    status2 = prob_lp.status
+    try:
+        prob_lp.solve(solver=cp.MOSEK, verbose=False, mosek_params=mosek_params)
+        status2 = prob_lp.status
+    except Exception as e:
+        print(f"    MOSEK failed in Stage 2: {e}")
+        return "solver_error", status1, None, None, None, None
     
     # Return the learned Q matrix, polynomial features, and optimization values if successful
     if status2 in ("optimal", "optimal_inaccurate"):
         Q_learned = Q.value
         Q_learned = 0.5 * (Q_learned + Q_learned.T)
-        # Q_learned_mat = Q_learned.reshape((d, d), order="C")
         E_Q_learned = prob_lp.value
         return status2, status1, Q_learned, C_val, E_Q_learned, mu
     else:
@@ -658,8 +699,10 @@ def solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, du):
         seed: Random seed
         dx: State dimension
         du: Input dimension
+    
+    Returns:
+        status: Solver status
     """
-
     d = P_z.shape[1]
 
     Q_id = cp.Variable((d, d)) 
@@ -677,23 +720,23 @@ def solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, du):
     C_matrix = np.zeros((d, d))
     C_matrix[:dx, :dx] = np.eye(dx)  # Identity for state dimensions
     C_matrix[dx:, dx:] = 0.8 * np.eye(du)  # 0.8 * Identity for input dimensions
-    
-    # constraints = [F_mat @ Q_id_vec <= cp.Constant(L_xu), cp.trace(Sigma_const @ Q_id) == 1,      ]
 
     objective = cp.Maximize(cp.trace(cp.Constant(C_matrix) @ Q_id))
     prob = cp.Problem(objective, cons)
-
-    prob.solve(solver=cp.MOSEK, verbose=False)
-
-    return prob.status
+    try:
+        prob.solve(solver=cp.MOSEK, verbose=False)
+        return prob.status
+    except Exception as e:
+        print(f"    MOSEK failed in Identity LP: {e}")
+        return "solver_error"
 
 
 def run_one(seed, dx, A, B, C_cost, N, gamma, M_offline, degree, rho, exclude_u_squared=False):
     """Generate a dataset and solve both LPs; return boundedness flags and Q quality comparison."""
     # Set seed for reproducibility
     np.random.seed(seed)
-
-    x, u, x_plus, u_plus = generate_dataset(A, B, N=N, dx=dx, du=B.shape[1], seed=seed)
+    
+    x, u, x_plus, u_plus = generate_dataset(A, B, N=N, dx=dx, du=B.shape[1], seed=0)
 
     # Compute polynomial features once for both methods
     z = np.concatenate([x, u], axis=1)
@@ -706,19 +749,23 @@ def run_one(seed, dx, A, B, C_cost, N, gamma, M_offline, degree, rho, exclude_u_
     else:
         poly = PolynomialFeatures(degree=degree, include_bias=False)
     
-    Z_all = np.concatenate([z, z_plus], axis=0)
+    Z_all = np.concatenate([z, z_plus], axis=0)  # Stack vertically: (2N, dx+du)
     P_all = poly.fit_transform(Z_all)
-    P_z = P_all[:N]
-    P_z_next = P_all[N:]
+    P_z = P_all[:N]       # First N rows
+    P_z_next = P_all[N:]  # Last N rows
     L_xu = stage_cost(x, u, C_cost, rho)
     
     # Auxiliary samples for moment matching
-    x_aux, u_aux = auxiliary_samples(M_offline, dx, B.shape[1], seed=seed)
+    x_aux, u_aux = auxiliary_samples(M_offline, dx, B.shape[1], seed=0)
     y_aux = np.concatenate([x_aux, u_aux], axis=1)
     P_y = poly.transform(y_aux)
     
     # Solve both methods using the same polynomial features
-    status_m2, status_m1, Q_learned, C_val, E_Q_learned, mu = solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M_offline, seed)
+    # Moment matching LP
+    status_m2, status_m1, Q_learned, C_val, E_Q_learned, mu= solve_moment_matching_Q(
+        P_z, P_z_next, P_y, L_xu, gamma, N, M_offline, seed)
+    
+    # Identity LP
     status_id = solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, B.shape[1])
 
     def is_bounded(status):
@@ -756,6 +803,19 @@ def run_one(seed, dx, A, B, C_cost, N, gamma, M_offline, degree, rho, exclude_u_
                 else:
                     result[f"{key}"] = str(value)
             
+            # Extract Q_uu components (action-action block) from both Q matrices
+            du_local = B.shape[1]
+            Q_uu_lqr = Q_optimal_orig[dx:, dx:]  # Shape: (du, du)
+            Q_uu_mm = Q_learned[dx:, dx:]        # Shape: (du, du)
+            
+            # Save Q_uu matrices (convert to nested lists for JSON serialization)
+            result["Q_uu_lqr_matrix"] = Q_uu_lqr.tolist()
+            result["Q_uu_mm_matrix"] = Q_uu_mm.tolist()
+            
+            # Save condition numbers of Q_uu matrices (important for numerical stability)
+            result["Q_uu_lqr_cond"] = float(np.linalg.cond(Q_uu_lqr))
+            result["Q_uu_mm_cond"] = float(np.linalg.cond(Q_uu_mm))
+            
             # Compare policy costs
             policy_metrics = compare_policy_costs(A, B, C_cost, rho, gamma, Q_learned, poly, dx, B.shape[1], 
                                                     n_test_states=100, horizon=1000, seed=seed + 3000)
@@ -789,7 +849,7 @@ def sweep_over_dims(dims, seeds, N, gamma, M_offline, degree, rho, exclude_u_squ
         
         for i, s in enumerate(seeds):
             # Use seed index to select different system (50 systems available per dimension)
-            system_idx = (i+7) % 50  # Wrap around if more than 50 seeds
+            system_idx = (i) % 50  # Wrap around if more than 50 seeds
             
             try:
                 A, B, C_cost = load_system(n=dx, idx=system_idx)
@@ -818,7 +878,7 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", type=float, default=GAMMA, help="Discount factor (default: from config)")
     parser.add_argument("--M_offline", type=int, default=250, help="Offline pool size (default: 500)")
     parser.add_argument("--degree", type=int, default=1, help="Polynomial feature degree (default: 1)")
-    parser.add_argument("--rho", type=float, default=0.001, help="Control cost weight (default: 0.1)")
+    parser.add_argument("--rho", type=float, default=0.1, help="Control cost weight (default: 0.1)")
     parser.add_argument("--exclude_u_squared", action="store_true", help="Exclude u^2 terms from polynomial features (for degree 2)")
     parser.add_argument("--out_json", type=str, default=None, help="Raw results JSON (if None, auto-generated with N)")
     parser.add_argument("--plot_dir", type=str, default=None, help="Plot filename (if None, auto-generated with N)")
@@ -839,9 +899,9 @@ if __name__ == "__main__":
 
     # Auto-generate filenames with N if not provided
     if args.out_json is None:
-        args.out_json = f"bounded_vs_dim_results_N_{args.N}.json"
+        args.out_json = f"bounded_vs_dim_results_N_{args.N}_rho_{args.rho}.json"
     if args.plot_dir is None:
-        args.plot_dir = f"../figures/bounded_vs_dim_percentages_N_{args.N}.pdf"
+        args.plot_dir = f"../figures/bounded_vs_dim_percentages_N_{args.N}_rho_{args.rho}.pdf"
 
     results = sweep_over_dims(dims, seeds, N=args.N, gamma=args.gamma, M_offline=args.M_offline, degree=degree, rho=args.rho, exclude_u_squared=args.exclude_u_squared)
 
@@ -958,7 +1018,7 @@ if __name__ == "__main__":
     # Save raw + aggregated
     df.to_json(args.out_json, orient="records", indent=2)
     # Generate aggregated filename with N
-    agg_json_name = f"bounded_vs_dim_percentages_N_{args.N}.json"
+    agg_json_name = f"bounded_vs_dim_percentages_N_{args.N}_rho_{args.rho}.json"
     agg.to_json(agg_json_name, orient="records", indent=2)
     
     # Print compact table
@@ -1003,8 +1063,8 @@ if __name__ == "__main__":
     # ===========================================
     # Font sizes for plots
     LABEL_SIZE = 20
-    TITLE_SIZE = 24
-    LEGEND_SIZE = 20
+    TITLE_SIZE = 20
+    LEGEND_SIZE = 18
     TICK_SIZE = 16
     
     fig1, axes1 = plt.subplots(1, 2, figsize=(14, 5))

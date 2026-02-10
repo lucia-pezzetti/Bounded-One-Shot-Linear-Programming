@@ -1117,3 +1117,173 @@ class point_mass_cubic_drag:
         L_x = np.sum((X @ self.Q) * X, axis=1)
         L_u = np.sum((U @ self.R) * U, axis=1)
         return L_x + L_u
+
+
+class point_mass_cubic_drag_2du(point_mass_cubic_drag):
+    """
+    nD point-mass with cubic drag and a FIXED input dimension du = 2,
+    with MODAL COUPLING in the spring term.
+
+    Continuous-time model:
+        p_dot = v
+        v_dot = -(1/m) K p - (c/m) ||v||^2 v + (1/m) B u
+
+    where K is a coupled stiffness matrix built from a modal decomposition:
+        K = Q Λ Q^T
+
+    Q: orthonormal "mode shape" basis (default: DCT-II orthonormal basis)
+    Λ: diagonal modal stiffness spectrum (default: λ_i = k0 * (i+1)^alpha)
+
+    Underactuation:
+        u ∈ R^2 always. If B is sparse in physical coordinates (recommended),
+        coupling through K propagates control influence across coordinates.
+
+    Notes:
+    - We override step() and linearized_system() to use K (not the scalar k).
+    - The parent class still stores self.k, but it is not used by this subclass'
+      dynamics once K is defined.
+    """
+
+    def __init__(
+        self,
+        n=2,
+        B=None,
+        mass=2.0,
+        # modal stiffness params
+        k0=5.0,         # overall stiffness scale (replaces 'k' effectively)
+        alpha=2.0,      # modal growth exponent; alpha=2 is "string/beam-ish"
+        # drag / discretization
+        c=1.2,
+        delta_t=0.02,
+        # cost / discount
+        C=None,
+        rho=1.0,
+        gamma=0.99,
+        N=0,
+        M=0,
+        # optional: custom modal basis / spectrum
+        Q=None,         # (n,n) orthonormal basis; if None -> DCT-II orthonormal
+        lambdas=None,   # (n,) diagonal entries for Λ; if None -> k0*(i+1)^alpha
+    ):
+        if n < 2:
+            raise ValueError(f"n must be >= 2 for the 2-input variant (got n={n}).")
+        self.n = int(n)
+
+        # ---- Build modal basis Q (orthonormal) ----
+        if Q is None:
+            # Orthonormal DCT-II basis (no SciPy needed)
+            # Q[k, i] = sqrt(2/n) * cos(pi/n * (i+0.5) * k) for k>0
+            # Q[0, i] = 1/sqrt(n)
+            i = np.arange(self.n, dtype=float)
+            k = np.arange(self.n, dtype=float)[:, None]  # (n,1)
+            Q = np.cos((np.pi / self.n) * (i + 0.5) * k)  # (n,n)
+            Q[0, :] = 1.0
+            Q *= np.sqrt(2.0 / self.n)
+            Q[0, :] *= 1.0 / np.sqrt(2.0)  # makes first row 1/sqrt(n)
+
+        Q = np.asarray(Q, dtype=float)
+        if Q.shape != (self.n, self.n):
+            raise ValueError(f"Q must have shape ({self.n}, {self.n}), got {Q.shape}")
+
+        # (Optional) sanity check orthonormality; keep it light to avoid brittleness
+        # You can comment this out if you prefer no checks.
+        QtQ = Q.T @ Q
+        if not np.allclose(QtQ, np.eye(self.n), atol=1e-6):
+            raise ValueError("Q must be (approximately) orthonormal: Q.T @ Q ≈ I.")
+
+        self.Q_modes = Q
+
+        # ---- Build modal stiffness spectrum Λ ----
+        if lambdas is None:
+            idx = np.arange(1, self.n + 1, dtype=float)  # 1..n
+            lambdas = float(k0) * (idx ** float(alpha))
+
+        lambdas = np.asarray(lambdas, dtype=float).reshape(-1)
+        if lambdas.size != self.n:
+            raise ValueError(f"lambdas must have length n={self.n}, got {lambdas.size}")
+        if np.any(lambdas < 0):
+            raise ValueError("lambdas must be nonnegative to keep K positive semidefinite.")
+
+        self.lambdas = lambdas
+
+        # Coupled stiffness matrix K = Q Λ Q^T
+        self.K = self.Q_modes @ (self.lambdas[:, None] * self.Q_modes.T)
+
+        # ---- Choose B (recommend: sparse physical actuation) ----
+        # Default: actuate two physical coordinates (1 and n), which becomes broad in modal space.
+        if B is None:
+            B = np.zeros((self.n, 2), dtype=float)
+            B[0, 0] = 1.0
+            B[-1, 1] = 1.0
+
+        B = np.asarray(B, dtype=float)
+        if B.shape != (self.n, 2):
+            raise ValueError(f"B must have shape ({self.n}, 2) for the 2-input variant, got {B.shape}")
+
+        # Call parent to set up dimensions, costs, sampling helpers, etc.
+        # We pass k=0.0 because this subclass uses self.K instead of scalar k.
+        super().__init__(
+            n=self.n,
+            m_u=2,
+            B=B,
+            mass=mass,
+            k=0.0,          # unused by this subclass' dynamics
+            c=c,
+            delta_t=delta_t,
+            C=C,
+            rho=rho,
+            gamma=gamma,
+            N=N,
+            M=M,
+        )
+
+    def step(self, x, u, wrap_angles=False):
+        """One forward-Euler step using coupled stiffness K."""
+        x, u = self._validate_x_u(x, u)
+
+        p = x[: self.n]
+        v = x[self.n :]
+
+        p_dot = v
+        v_norm_sq = float(v @ v)
+        Bu = self.B @ u
+
+        # Coupled spring term: -(1/m) K p
+        v_dot = -(1.0 / self.m) * (self.K @ p) - (self.c / self.m) * v_norm_sq * v + (1.0 / self.m) * Bu
+
+        x_next = np.empty_like(x)
+        x_next[: self.n] = p + self.delta_t * p_dot
+        x_next[self.n :] = v + self.delta_t * v_dot
+        return x_next
+
+    def linearized_system(self, use_backward_euler=False):
+        """
+        Discrete-time linearization around the origin.
+
+        At v=0, cubic drag Jacobian is zero, so:
+            p_dot = v
+            v_dot = -(1/m) K p + (1/m) B u
+        """
+        In = np.eye(self.n)
+        Zn = np.zeros((self.n, self.n))
+
+        A_c = np.block([
+            [Zn, In],
+            [-(1.0 / self.m) * self.K, Zn]
+        ])
+
+        B_c = np.vstack([
+            np.zeros((self.n, self.N_u)),
+            (1.0 / self.m) * self.B
+        ])
+
+        dt = self.delta_t
+        if use_backward_euler:
+            I = np.eye(self.N_x)
+            A_d = np.linalg.inv(I - dt * A_c)
+            B_d = A_d @ (dt * B_c)
+        else:
+            A_d = np.eye(self.N_x) + dt * A_c
+            B_d = dt * B_c
+
+        return A_d, B_d

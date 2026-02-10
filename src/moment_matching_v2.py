@@ -96,7 +96,7 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, N, M, gamma, regularizatio
     constraints = [
         # moment_norm <= dimension_scaled_regularization,  # Adaptive relaxed moment matching
         moment_norm <= 0.0,
-        # cp.sum(lambda_var) == 1.0,
+        cp.sum(mu_var) == 1.0,
     ]
 
     # Objective: minimize ||I - sum_i mu_i * y_i y_i^T||_F

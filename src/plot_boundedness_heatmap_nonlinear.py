@@ -16,12 +16,12 @@ def load_nonlinear_data():
     src_dir = Path(__file__).parent
     
     # N values to look for
-    N_values = [1000, 3000, 5000, 7000]
+    N_values = [250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000]
     
     # Check which files actually exist
     found_N_values = []
     for N in N_values:
-        fname = src_dir / f"bounded_vs_dim_results_nonlinear_N_{N}.json"
+        fname = src_dir / f"bounded_vs_dim_results_nonlinear_N_{N}_fixed_du_True.json"
         if fname.exists():
             found_N_values.append(N)
     
@@ -32,7 +32,7 @@ def load_nonlinear_data():
     dx_values = set()
     
     for N in found_N_values:
-        fname = src_dir / f"bounded_vs_dim_results_nonlinear_N_{N}.json"
+        fname = src_dir / f"bounded_vs_dim_results_nonlinear_N_{N}_fixed_du_True.json"
         
         try:
             with open(fname, 'r') as f:
@@ -89,20 +89,20 @@ def plot_heatmaps(moment_matrix, identity_matrix, dx_values, N_values, output_fi
     """Create two side-by-side heatmaps with shared color scale."""
     colormap = 'RdYlGn'
     
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
     
     # Common color scale settings - explicitly set to 0-100 for both plots
     vmin = 0.0
     vmax = 100.0
     
     # Font sizes
-    TITLE_SIZE = 20
-    LABEL_SIZE = 20
-    TICK_SIZE = 18
+    TITLE_SIZE = 24
+    LABEL_SIZE = 24
+    TICK_SIZE = 20
     ANNOTATION_SIZE = 16
     
-    # Labels show dx + du where du = dx/2
-    dx_du_labels = [str(int(dx + dx // 2)) for dx in dx_values]
+    # Labels show dx
+    dx_labels = [str(int(dx)) for dx in dx_values]
     
     # Plot 1: Moment Matching
     im1 = axes[0].imshow(moment_matrix, aspect='auto', cmap=colormap, 
@@ -110,13 +110,13 @@ def plot_heatmaps(moment_matrix, identity_matrix, dx_values, N_values, output_fi
     axes[0].invert_yaxis()  # Reverse the dimension axis
     axes[0].set_title('Moment Matching Boundedness (%)', fontsize=TITLE_SIZE, fontweight='bold', pad=15)
     axes[0].set_xlabel('N (Number of Samples)', fontsize=LABEL_SIZE)
-    axes[0].set_ylabel('dx + du (state + input dimension)', fontsize=LABEL_SIZE)
+    axes[0].set_ylabel('dx (state dimension)', fontsize=LABEL_SIZE)
     
     # Set ticks with better formatting
     axes[0].set_xticks(range(len(N_values)))
     axes[0].set_xticklabels(N_values, rotation=45, ha='right', fontsize=TICK_SIZE)
     axes[0].set_yticks(range(len(dx_values)))
-    axes[0].set_yticklabels(dx_du_labels, fontsize=TICK_SIZE)
+    axes[0].set_yticklabels(dx_labels, fontsize=TICK_SIZE)
     
     # Add grid for better readability
     axes[0].set_xticks([x - 0.5 for x in range(len(N_values) + 1)], minor=True)
@@ -141,13 +141,13 @@ def plot_heatmaps(moment_matrix, identity_matrix, dx_values, N_values, output_fi
     axes[1].invert_yaxis()  # Reverse the dimension axis
     axes[1].set_title('Identity Covariance Boundedness (%)', fontsize=TITLE_SIZE, fontweight='bold', pad=15)
     axes[1].set_xlabel('N (Number of Samples)', fontsize=LABEL_SIZE)
-    axes[1].set_ylabel('dx + du (state + input dimension)', fontsize=LABEL_SIZE)
+    axes[1].set_ylabel('dx (state dimension)', fontsize=LABEL_SIZE)
     
     # Set ticks with better formatting
     axes[1].set_xticks(range(len(N_values)))
     axes[1].set_xticklabels(N_values, rotation=45, ha='right', fontsize=TICK_SIZE)
     axes[1].set_yticks(range(len(dx_values)))
-    axes[1].set_yticklabels(dx_du_labels, fontsize=TICK_SIZE)
+    axes[1].set_yticklabels(dx_labels, fontsize=TICK_SIZE)
     
     # Add grid for better readability
     axes[1].set_xticks([x - 0.5 for x in range(len(N_values) + 1)], minor=True)
@@ -212,7 +212,7 @@ def main():
         figures_dir.mkdir(exist_ok=True)
         
         # Plot heatmaps
-        output_file = figures_dir / "boundedness_heatmap_nonlinear_dx_vs_N.pdf"
+        output_file = figures_dir / "boundedness_heatmap_nonlinear_dx_vs_N_fixed_du.pdf"
         print(f"Creating heatmaps...")
         plot_heatmaps(moment_matrix, identity_matrix, dx_values, N_values, output_file)
         

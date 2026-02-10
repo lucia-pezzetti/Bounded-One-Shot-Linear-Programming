@@ -32,7 +32,7 @@ DISCOUNT_RATE_PER_SECOND = 1e-3  # 1% per second discount rate
 # Convert continuous-time discount rate to discrete-time discount factor
 # gamma = exp(-discount_rate * dt)
 # GAMMA = np.exp(-DISCOUNT_RATE_PER_SECOND * DT)
-GAMMA = 0.99
+GAMMA = 0.95
 
 # Legacy ALPHA parameter (kept for backward compatibility)
 ALPHA = DISCOUNT_RATE_PER_SECOND
@@ -177,10 +177,22 @@ U_BOUNDS_BALL_PLATE = (
 
 DT_POINT_MASS_2D = DT  # reuse global project sampling time by default
 
-# Physical parameters
+# Physical parameters (nominal values)
 M_POINT_MASS_2D = 2.0   # mass (kg)
-K_POINT_MASS_2D = 10.0   # spring constant (N/m) pulling towards origin
-C_POINT_MASS_2D = 1.2   # cubic/quad-drag coefficient (N*s^2/m^2)
+K_POINT_MASS_2D = 10.0   # spring constant (N/m) pulling towards origin (used by fully-actuated variant)
+C_POINT_MASS_2D = 1.2   # cubic/quad-drag coefficient (N*s^2/m^2) ##### with larger values, it's more difficult to get bounded id LP
+
+# Modal stiffness scaling for point_mass_cubic_drag_2du:
+#   k0 = m * OMEGA_MAX^2 / n^alpha   so that the highest modal frequency is always OMEGA_MAX,
+#   regardless of n and alpha.  (lambda_n = k0 * n^alpha = m * OMEGA_MAX^2)
+OMEGA_MAX_POINT_MASS = 10.0  # highest modal natural frequency (rad/s)
+
+# LogNormal distribution parameters for system randomization
+# Sample X ~ LogNormal(μ, σ) where μ = log(X0) - 0.5*σ² ensures E[X] = X0
+# σ controls coefficient of variation: CV ≈ σ for small σ, CV = sqrt(exp(σ²)-1) exactly
+SIGMA_M_POINT_MASS = 0.3   # ~30% CV for mass uncertainty
+SIGMA_K_POINT_MASS = 0.4   # ~40% CV for spring constant uncertainty  
+SIGMA_C_POINT_MASS = 0.5   # ~50% CV for damping uncertainty (hardest to measure)
 
 # Quadratic stage cost weights (in shifted/original coordinates as you define in your scripts)
 # cost(x,u) = || C x ||^2 + rho * ||u||^2
@@ -195,8 +207,8 @@ RHO_POINT_MASS_2D = 0.01
 # Sampling bounds for data generation (uniform hyper-rectangle)
 # Position and velocity bounds apply component-wise to all dimensions.
 # These are tuples (low, high) that are applied to each component.
-P_BOUNDS_POINT_MASS = (-3.0, 3.0)    # Position bounds (applied to each component)
-V_BOUNDS_POINT_MASS = (-3.0, 3.0)    # Velocity bounds (applied to each component)
+P_BOUNDS_POINT_MASS = (-5.0, 5.0)    # Position bounds (applied to each component)
+V_BOUNDS_POINT_MASS = (-5.0, 5.0)    # Velocity bounds (applied to each component)
 U_BOUNDS_POINT_MASS = (-8.0, 8.0)    # Control bounds (applied to each component)
 
 # Focused bounds for test/evaluation sampling (optional)
@@ -214,7 +226,7 @@ V_BOUNDS_POINT_MASS_2D_TEST = V_BOUNDS_POINT_MASS_TEST
 # =============================================================================
 # POLYNOMIAL FEATURE PARAMETERS
 # =============================================================================
-DEGREE = 2    # polynomial feature degree (increased to capture nonlinear dynamics)
+DEGREE = 1    # polynomial feature degree (increased to capture nonlinear dynamics)
 
 # =============================================================================
 # EXPERIMENT PARAMETERS
