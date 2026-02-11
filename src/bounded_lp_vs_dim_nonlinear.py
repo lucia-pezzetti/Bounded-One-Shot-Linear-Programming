@@ -638,11 +638,11 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     
     parser = argparse.ArgumentParser(description="Boundedness vs state dimension (nonlinear point mass systems).")
-    parser.add_argument("--dims", type=str, default="4,6,8,10,12,14,16,18,20", help="Comma-separated list of state dimensions (e.g., '2,4,6,8,10'). Default: 2,4,6,8,10")
+    parser.add_argument("--dims", type=str, default="4,6,8,10,12", help="Comma-separated list of state dimensions (e.g., '2,4,6,8,10'). Default: 2,4,6,8,10")
     parser.add_argument("--seeds", type=int, default=10, help="Number of seeds per dimension (default: 10)")
     parser.add_argument("--N", type=int, default=1000, help="Number of samples for dataset (default: 1000)")
     parser.add_argument("--gamma", type=float, default=GAMMA, help="Discount factor (default: from config)")
-    parser.add_argument("--M_offline", type=int, default=500, help="Offline pool size (default: 500)")
+    parser.add_argument("--M_offline", type=int, default=250, help="Offline pool size (default: 500)")
     parser.add_argument("--degree", type=int, default=2, help="Polynomial feature degree (default: 1)")
     parser.add_argument("--exclude_u_squared", action="store_true", help="Exclude u^2 terms from polynomial features (for degree 2)")
     parser.add_argument("--randomize_system", action="store_true", help="Sample m, k, c from LogNormal distributions per seed (default: use fixed values)")

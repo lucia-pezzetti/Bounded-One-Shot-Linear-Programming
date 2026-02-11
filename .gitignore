@@ -27,3 +27,4 @@ ADP_LP/
 
 # Generated system data files (can be regenerated with matrix_generation.py)
 data/*_systems*.json
+src/plot_*.py
