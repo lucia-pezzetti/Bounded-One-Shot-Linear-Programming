@@ -8,7 +8,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from scipy.linalg import solve_discrete_are
 from scipy import sparse
 from feature_scaling import FilteredPolynomialFeatures
-from dynamical_systems_polished import dlqr
+from dynamical_systems import dlqr
 
 # Add parent directory to path to import from data module
 sys.path.insert(0, str(Path(__file__).parent.parent))

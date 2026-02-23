@@ -57,7 +57,7 @@ def load_systems(n: int) -> List[Dict]:
     Raises:
         FileNotFoundError: If no file exists for the given dimension.
     """
-    filename = os.path.join(DATA_DIR, f"dx_{n}_du_2_systems_v2.json")
+    filename = os.path.join(DATA_DIR, f"dx_{n}_du_2_systems.json")
     if not os.path.exists(filename):
         raise FileNotFoundError(f"No systems file found for dimension {n}. "
                                 f"Available dimensions: {get_available_dimensions()}")

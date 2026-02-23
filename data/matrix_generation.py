@@ -85,7 +85,7 @@ for n in range(2, 31, 1):
         total_attempts += attempts
     
     # Save all systems for this dimension to a single JSON file
-    filename = os.path.join(SCRIPT_DIR, f"dx_{n}_du_2_systems_v2.json")
+    filename = os.path.join(SCRIPT_DIR, f"dx_{n}_du_2_systems.json")
     with open(filename, "w") as f:
         json.dump({
             "dimension": n,

@@ -1,10 +1,11 @@
+.vscode/
 src/direct_matching.py
 src/test.py
 src/stability.py
 src/old_main.py
 results/
 src/*.json
-src/__pycache__/
+__pycache__/
 figures/
 src/*.png
 
@@ -21,10 +22,19 @@ src/plot_all_converged_costs.py
 src/plot_costs_from_json.py
 src/plot_costs_vs_convergence.py
 src/visualization.py
+src/bounded_lp_nonlinear.py
+src/bounded_lp_sweep.py
+src/bounded_lp_sweep_lqr.py
+src/convergence_region_analysis.py
+src/ploy_boundedness_heatmap.py
+src/plot_boundedness_heatmap_nonlinear.py
+src/moment_matching.py
+src/policy_extraction.py
+src/policy_extractor_polished.py
+src/utils.py
+src/feature_scaling.py
 
 # Embedded git repository (separate project)
 ADP_LP/
 
-# Generated system data files (can be regenerated with matrix_generation.py)
-data/*_systems*.json
 src/plot_*.py
