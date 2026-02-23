@@ -1,6 +1,7 @@
-numpy==1.26.4
-scipy==1.16.2
-cvxpy==1.7.2
-scikit-learn==1.2.2
-matplotlib==3.8.0
-pandas==2.1.4
+numpy==2.2.4
+scipy==1.15.2
+cvxpy==1.6.4
+Mosek==11.0.21
+scikit-learn==1.6.1
+matplotlib==3.10.1
+pandas==2.2.3
