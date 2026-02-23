@@ -32,7 +32,7 @@ DISCOUNT_RATE_PER_SECOND = 1e-3  # 1% per second discount rate
 # Convert continuous-time discount rate to discrete-time discount factor
 # gamma = exp(-discount_rate * dt)
 # GAMMA = np.exp(-DISCOUNT_RATE_PER_SECOND * DT)
-GAMMA = 0.95
+GAMMA = 0.99
 
 # Legacy ALPHA parameter (kept for backward compatibility)
 ALPHA = DISCOUNT_RATE_PER_SECOND
@@ -114,10 +114,10 @@ COUPLED_CUBIC_MATRIX_SEED = 42  # Fixed seed for matrix generation reproducibili
 THETA_BOUNDS_SINGLE_PENDULUM_TEST = (-3.0, 3.0)
 THETA_DOT_BOUNDS_SINGLE_PENDULUM_TEST = (-6.0, 6.0)
 
-X_BOUNDS_GRID = (-5.0, 5.0)
-X_DOT_BOUNDS_GRID = (-5.0, 5.0)
-THETA_BOUNDS_GRID = (-1.5, 1.5)
-THETA_DOT_BOUNDS_GRID = (-1.5, 1.5)
+X_BOUNDS_GRID = (-3.0, 3.0)
+X_DOT_BOUNDS_GRID = (-3.0, 3.0)
+THETA_BOUNDS_GRID = (-1.0, 1.0)
+THETA_DOT_BOUNDS_GRID = (-1.0, 1.0)
 
 # =============================================================================
 # BALL-PLATE SYSTEM PARAMETERS
@@ -178,14 +178,14 @@ U_BOUNDS_BALL_PLATE = (
 DT_POINT_MASS_2D = DT  # reuse global project sampling time by default
 
 # Physical parameters (nominal values)
-M_POINT_MASS_2D = 2.0   # mass (kg)
+M_POINT_MASS_2D = 5.0   # mass (kg)
 K_POINT_MASS_2D = 10.0   # spring constant (N/m) pulling towards origin (used by fully-actuated variant)
-C_POINT_MASS_2D = 1.2   # cubic/quad-drag coefficient (N*s^2/m^2) ##### with larger values, it's more difficult to get bounded id LP
+C_POINT_MASS_2D = 0.5   # cubic/quad-drag coefficient (N*s^2/m^2) ##### with larger values, it's more difficult to get bounded id LP
 
 # Modal stiffness scaling for point_mass_cubic_drag_2du:
 #   k0 = m * OMEGA_MAX^2 / n^alpha   so that the highest modal frequency is always OMEGA_MAX,
 #   regardless of n and alpha.  (lambda_n = k0 * n^alpha = m * OMEGA_MAX^2)
-OMEGA_MAX_POINT_MASS = 10.0  # highest modal natural frequency (rad/s)
+OMEGA_MAX_POINT_MASS = 5.0  # highest modal natural frequency (rad/s)
 
 # LogNormal distribution parameters for system randomization
 # Sample X ~ LogNormal(μ, σ) where μ = log(X0) - 0.5*σ² ensures E[X] = X0
@@ -207,13 +207,13 @@ RHO_POINT_MASS_2D = 0.01
 # Sampling bounds for data generation (uniform hyper-rectangle)
 # Position and velocity bounds apply component-wise to all dimensions.
 # These are tuples (low, high) that are applied to each component.
-P_BOUNDS_POINT_MASS = (-5.0, 5.0)    # Position bounds (applied to each component)
-V_BOUNDS_POINT_MASS = (-5.0, 5.0)    # Velocity bounds (applied to each component)
-U_BOUNDS_POINT_MASS = (-8.0, 8.0)    # Control bounds (applied to each component)
+P_BOUNDS_POINT_MASS = (-8.0, 8.0)    # Position bounds (applied to each component)
+V_BOUNDS_POINT_MASS = (-8.0, 8.0)    # Velocity bounds (applied to each component)
+U_BOUNDS_POINT_MASS = (-20.0, 20.0)    # Control bounds (applied to each component)
 
 # Focused bounds for test/evaluation sampling (optional)
-P_BOUNDS_POINT_MASS_TEST = (-3.0, 3.0)  # Test position bounds
-V_BOUNDS_POINT_MASS_TEST = (-3.0, 3.0)  # Test velocity bounds
+P_BOUNDS_POINT_MASS_TEST = (-6.0, 6.0)  # Test position bounds
+V_BOUNDS_POINT_MASS_TEST = (-6.0, 6.0)  # Test velocity bounds
 
 # Legacy names for backward compatibility (2D-specific naming)
 P_BOUNDS_POINT_MASS_2D = P_BOUNDS_POINT_MASS

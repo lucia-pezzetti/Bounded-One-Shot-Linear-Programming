@@ -4,7 +4,7 @@
 # Usage: ./run_bounded_lp_sweep.sh
 
 # Array of N values to test
-N_VALUES=(500 1000 1500 2000 2500 3000)
+N_VALUES=(500 1000 1500 2000 2500 3000 3500 4000 4500 5000 10000 15000 20000)
 
 # Change to the directory where the script is located (src directory)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,9 +20,10 @@ for N in "${N_VALUES[@]}"; do
     # Add other arguments as needed (you can modify these)
     python bounded_lp_vs_dim_nonlinear.py \
         --N "$N" \
+        --dims 2,4,6,8,10 \
         --seeds 10 \
-        --M_offline 250 \
-        --fixed_du \
+        --M_offline 500 \
+        --fixed_du 1\
         --randomize_system \
     
     # Check if the command was successful
