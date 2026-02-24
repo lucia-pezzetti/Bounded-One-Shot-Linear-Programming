@@ -650,8 +650,8 @@ def plot_policy_trajectories(traj_mm, traj_zero, dt, dx, du, save_path=None,
     
     lw = 0.5
     alpha = 0.2
-    color_mm = "#d62728"      # blue for MM
-    color_zero = "#1f77b4"  # red for zero-input
+    color_mm = "#0072B2"      # Okabe-Ito blue for MM
+    color_zero = "#D55E00"    # Okabe-Ito vermillion for zero-input
     
     X_mm = traj_mm["X"][:n_show]      # (n_show, T+1, dx)
     U_mm = traj_mm["U"][:n_show]      # (n_show, T, du)
@@ -664,12 +664,12 @@ def plot_policy_trajectories(traj_mm, traj_zero, dt, dx, du, save_path=None,
         for j in range(dx):
             ax_s.plot(t_state, X_zero[r, :, j], color=color_zero,
                       alpha=alpha, linewidth=lw,
-                      label="Zero input" if (r == 0 and j == 0) else None)
+                      label="Uncontrolled" if (r == 0 and j == 0) else None)
     for r in range(X_mm.shape[0]):
         for j in range(dx):
             ax_s.plot(t_state, X_mm[r, :, j], color=color_mm,
                       alpha=alpha, linewidth=lw,
-                      label="MM" if (r == 0 and j == 0) else None)
+                      label="MM control" if (r == 0 and j == 0) else None)
     ax_s.set_ylabel("State", fontsize=16)
     # ax_s.set_title("State trajectories", fontsize=16)
     ax_s.legend(loc="upper right", fontsize=16)
@@ -681,12 +681,12 @@ def plot_policy_trajectories(traj_mm, traj_zero, dt, dx, du, save_path=None,
         for j in range(du):
             ax_u.plot(t_ctrl, U_zero[r, :, j], color=color_zero,
                       alpha=alpha, linewidth=lw,
-                      label="Zero input" if (r == 0 and j == 0) else None)
+                      label="Uncontrolled" if (r == 0 and j == 0) else None)
     for r in range(U_mm.shape[0]):
         for j in range(du):
             ax_u.plot(t_ctrl, U_mm[r, :, j], color=color_mm,
                       alpha=alpha, linewidth=lw,
-                      label="MM" if (r == 0 and j == 0) else None)
+                      label="MM control" if (r == 0 and j == 0) else None)
     ax_u.set_ylabel("Control", fontsize=16)
     ax_u.set_xlabel("Time (s)", fontsize=16)
     # ax_u.set_title("Control trajectories", fontsize=16)
@@ -991,7 +991,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     
     parser = argparse.ArgumentParser(description="Boundedness vs state dimension (nonlinear point mass systems).")
-    parser.add_argument("--dims", type=str, default="2, 4,6,8,10", help="Comma-separated list of state dimensions (e.g., '2,4,6,8,10'). Default: 2,4,6,8,10")
+    parser.add_argument("--dims", type=str, default="2,4,6,8,10", help="Comma-separated list of state dimensions (e.g., '2,4,6,8,10'). Default: 2,4,6,8,10")
     parser.add_argument("--seeds", type=int, default=10, help="Number of seeds per dimension (default: 10)")
     parser.add_argument("--N", type=int, default=1000, help="Number of samples for dataset (default: 1000)")
     parser.add_argument("--gamma", type=float, default=GAMMA, help="Discount factor (default: from config)")
@@ -999,7 +999,7 @@ if __name__ == "__main__":
     parser.add_argument("--degree", type=int, default=2, help="Polynomial feature degree (default: 1)")
     parser.add_argument("--exclude_u_squared", action="store_true", help="Exclude u^2 terms from polynomial features (for degree 2)")
     parser.add_argument("--randomize_system", action="store_true", help="Sample m, k, c from LogNormal distributions per seed (default: use fixed values)")
-    parser.add_argument("--fixed_du", type=int, default=0, help="Fixed control dimension: 0 = fully actuated (du=n), 1 = du=1, 2 = du=2. Default: 0.")
+    parser.add_argument("--fixed_du", type=int, default=1, help="Fixed control dimension: 0 = fully actuated (du=n), 1 = du=1, 2 = du=2. Default: 0.")
     parser.add_argument("--plot_trajectories", action="store_true", help="Save trajectory comparison plots (MM vs LQR) for each bounded run")
     parser.add_argument("--out_json", type=str, default=None, help="Raw results JSON (if None, auto-generated with N)")
     parser.add_argument("--plot_dir", type=str, default=None, help="Plot filename (if None, auto-generated with N)")

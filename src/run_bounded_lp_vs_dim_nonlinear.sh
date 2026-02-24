@@ -1,10 +1,9 @@
 #!/bin/bash
 
-# Script to run bounded_lp_vs_dim_linear.py with different N values
-# Usage: ./run_bounded_lp_sweep.sh
+# Script to run bounded_lp_vs_dim_nonlinear.py with different N values
 
 # Array of N values to test
-N_VALUES=(250 500 750 1000 1250 1500 1750 2000 2250 2500 2750 3000)
+N_VALUES=(5000)
 
 # Change to the directory where the script is located (src directory)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -18,10 +17,13 @@ for N in "${N_VALUES[@]}"; do
     
     # Run the Python script with the current N value
     # Add other arguments as needed (you can modify these)
-    python bounded_lp_vs_dim_linear.py \
+    python bounded_lp_vs_dim_nonlinear.py \
         --N "$N" \
+        --dims 2,4,6,8,10 \
         --seeds 10 \
-        --M_offline 250 \
+        --M_offline 500 \
+        --fixed_du 1\
+        --randomize_system \
     
     # Check if the command was successful
     if [ $? -eq 0 ]; then
