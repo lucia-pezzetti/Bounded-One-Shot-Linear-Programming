@@ -37,7 +37,9 @@ To reproduce the results in the paper run
 ## Results
 The obtained results are reported in the following plots
 
-
+<p align="center">
+  <img src="figures/boundedness_heatmap_dx_vs_N.pdf" width="600">
+</p>
 
 # Mechanical system with cubic damping
 
