@@ -38,14 +38,45 @@ To reproduce the results in the paper run
 The obtained results are reported in the following plots
 
 <p align="center">
-  <img src="figures/boundedness_heatmap_dx_vs_N.png" width="600">
+  <img src="figures/boundedness_heatmap_dx_vs_N.png" height="300" style="vertical-align: middle;">
+  <img src="figures/policy_value_comparison_N500_3000.png" height="300" style="vertical-align: middle;">
 </p>
 
-<p align="center">
-  <img src="figures/policy_value_comparison_N500_3000.png" width="600">
-</p>
+Left: Empirical boundedness rate of the linear programs as a function of the state dimension $dx$ (and the the size of the decision variable matrix in the LP $d$) and the number of samples $N$. Each entry corresponds to the percentage of random problem instances (out of 10 seeds) for which the corresponding LP admits a bounded solution. The left panel shows the proposed moment-matching formulation, while the right panel reports the baseline LP using as direction a fixed identity covariance structure. 
+Right: Normalized closed-loop cost difference between the learned policy and the optimal LQR policy, and normalized difference between the learned value function and the optimal LQR value for $N=500$ (up) and $N=3000$ (down). For each state dimension, solid lines indicate the mean normalized error across seeds, and shaded regions denote the standard deviation range.
 
 # Mechanical system with cubic damping
+
+We further investigate the proposed method on a class of nonlinear control systems given by an $n$-dimensional point-mass model with modal spring coupling and cubic drag.
+The continuous-time dynamics are
+
+$$
+\begin{aligned}
+\dot{p} &= v, \\
+m \dot{v} &= - K p - c \|v\|^2 v + B u.
+\end{aligned}
+$$
+
+where $m$ is the mass, $c>0$ is the cubic-drag coefficient, $u \in \mathbb{R}$ is a scalar control input, and $p,v \in \mathbb{R}^n$ denote position and velocity, respectively.
+The stiffness matrix $K \in \mathbb{R}^{n \times n}$ is a positive semidefinite stiffness matrix of the form $K = Q \Lambda Q^T$ with $Q$ orthogonal and diagonal spectrum $\Lambda = \mathrm{diag}(\lambda_1,\dots,\lambda_n)$.
+The eigenvalues follow a power-law growth
+
+$$
+    \lambda_i = k_0 i^{\alpha}, \quad i = 1, \dots, n,
+$$
+
+which yields increasingly fast and stiff high-frequency modes as the dimension grows. The base stiffness is set so that the highest modal natural frequency
+equals a target $\omega_{\max}$:
+
+$$
+  k_0 = \frac{m\,\omega_{\max}^{2}}{n^{\alpha}},
+  \qquad \omega_{\max} = 5\;\text{rad/s}.
+$$
+
+The input matrix $B \in \mathbb{R}^{n \times 1}$ is chosen as a
+normalized dense random vector, meaning that the single scalar
+actuator applies force in a generic direction that influences all
+coordinates, while keeping the overall input magnitude independent of the state dimension.
 
 # References and Contacts
 Please reach out to lpezzetti@ethz.ch for any question about the code
