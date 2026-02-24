@@ -6,7 +6,7 @@ src/old_main.py
 results/
 src/*.json
 __pycache__/
-figures/
+src/figures/
 src/*.png
 
 src/lunar_landing_test.py
@@ -37,5 +37,6 @@ src/feature_scaling.py
 
 # Embedded git repository (separate project)
 ADP_LP/
+plots/
 
 src/plot_*.py
