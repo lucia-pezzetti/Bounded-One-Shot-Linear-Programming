@@ -33,7 +33,7 @@ The dataset of $N$ state-action samples is sampled from $\mathcal{U}([-0.5, 0.5]
 To reproduce the results in the paper run 
 
 ```
-./run_bounded_ps_vs_dim_linear.sh
+./run_bounded_lp_vs_dim_linear.sh
 ```
 
 ## Results
