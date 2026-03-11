@@ -128,7 +128,11 @@ The obtained results are reported in the following plots
 </p>
 
 Left: Empirical boundedness rate of the linear programs as a function of the state dimension $dx$ (and the the size of the decision variable matrix in the LP $d$) and the number of samples $N$. Each entry corresponds to the percentage of random problem instances (out of 10 seeds) for which the corresponding LP admits a bounded solution. The left panel shows the proposed moment-matching formulation, while the right panel reports the baseline LP using as direction a fixed identity covariance structure. Polynomial features with degree 2 in $x$ have been used.
-Right: $N = 5000, M =500, dx = 4$, $m=5kg, w_{max} = 5 rad/s, c = 0.5 Ns^2/m^2$. MM cost: $9675.50 \pm 5069.84$   |  Uncontrolled cost: $10104.59 \pm 5050.46$
+Right: Representative closed-loop trajectories for $dx=4$, $N = 5000, M =500, $m=5kg, w_{max} = 5 rad/s and c = 0.5 Ns^2/m^2$. The \textit{moment-matching} (MM) controller achieves a cost of $9675.50 \pm 5069.84$ and reduces oscillations compared to the zero-input baseline, whose obtained cost is $10104.59 \pm 5050.46$.
+
+### Computational Remarks
+The baseline approach requires solving only the data-driven LP of Equation 5, but often results in unbounded problems. The proposed method introduces an LMI preprocessing step to construct a feasible objective direction. Although this increases the offline computational cost, it substantially enlarges the regime in which the LP admits a finite solution. 
+For the tested dimensions, this preprocessing overhead is moderate compared to the benefit of guaranteed boundedness. The following image reports the averaged solving times across the bounded instances. We also mention that we are confident that the code can be further optimized and times can be surely decreased.
 
 # References and Contacts
 Please reach out to lpezzetti@ethz.ch for any question about the code
