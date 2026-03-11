@@ -95,7 +95,7 @@ $$
 \end{aligned}
 $$
 
-The datasets of $N$ state-action pairs and of $M$ auxiliary samples is randomly drawn accordingly to $p,v \in [-8, 8]^{dx}, u \in [-20, 20]$
+The datasets of $N$ state-action pairs and of $M=500$ auxiliary samples is randomly drawn accordingly to $p,v \in [-8, 8]^{dx}, u \in [-20, 20]$
 
 To reproduce the results in the paper run
 
