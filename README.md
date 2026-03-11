@@ -28,6 +28,8 @@ A_{ij}, B_{ij} \sim
 \end{cases}
 $$
 
+The dataset of $N$ state-action samples is sampled from $\mathcal{U}([-0.5, 0.5]^{n_x}\times[-3.0,3.0]^2)$ and the corresponding next states and stage costs are computed. An auxiliary pool of $M=250$ samples, drawn from the same distribution, is used to construct the covariance surrogate $C$ in the moment-matching formulation.
+
 To reproduce the results in the paper run 
 
 ```
@@ -92,6 +94,8 @@ $$
    \alpha \sim \mathrm{Uniform}(1.8, 2.2) \quad \text{(modal growth exponent)}.
 \end{aligned}
 $$
+
+The datasets of $N$ state-action pairs and of $M$ auxiliary samples is randomly drawn accordingly to $p,v \in [-8, 8]^{dx}, u \in [-20, 20]$
 
 To reproduce the results in the paper run
 
