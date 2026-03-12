@@ -131,8 +131,7 @@ Left: Empirical boundedness rate of the linear programs as a function of the sta
 Right: Representative closed-loop trajectories for $dx=4$, $N = 5000, M =500, $m=5kg, w_{max} = 5 rad/s and c = 0.5 Ns^2/m^2$. The \textit{moment-matching} (MM) controller achieves a cost of $9675.50 \pm 5069.84$ and reduces oscillations compared to the zero-input baseline, whose obtained cost is $10104.59 \pm 5050.46$.
 
 ### Computational Remarks
-The baseline approach requires solving only the data-driven LP of Equation 5, but often results in unbounded problems. The proposed method introduces an LMI preprocessing step to construct a feasible objective direction. Although this increases the offline computational cost, it substantially enlarges the regime in which the LP admits a finite solution. 
-For the tested dimensions, this preprocessing overhead is moderate compared to the benefit of guaranteed boundedness. The following image reports the averaged solving times across the bounded instances. We also mention that we are confident that the code can be further optimized and times can be surely decreased.
+The baseline approach requires solving only the LP~\eqref{data-driven_LP} but often results in unbounded problems. The proposed moment-matching LP adds the cost of solving~\eqref{ifcond}, but substantially enlarges the regime in which the LP admits a finite solution. For the tested dimensions, this preprocessing overhead is moderate compared to the benefit of guaranteed boundedness. The following image reports the averaged solving times across the bounded instances. We note that the implementation could likely be further optimized, potentially leading to reduced computation times.
 
 <p align="center">
   <img src="figures/lp_solve_time_heatmap_nonlinear_dx_vs_N_fixed_du_1_degree_2.png" height="250" style="vertical-align: middle;">
