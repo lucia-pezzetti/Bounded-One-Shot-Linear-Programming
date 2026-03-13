@@ -33,6 +33,7 @@ src/policy_extraction.py
 src/policy_extractor_polished.py
 src/utils.py
 src/feature_scaling.py
+src/dynamical_systems_complete.py
 .DS_Store
 
 # Embedded git repository (separate project)
