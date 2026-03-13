@@ -657,7 +657,16 @@ def plot_policy_trajectories(traj_mm, traj_zero, dt, dx, du, save_path=None,
                       label="MM control" if (r == 0 and j == 0) else None)
     ax_s.set_ylabel("State", fontsize=16)
     # ax_s.set_title("State trajectories", fontsize=16)
-    ax_s.legend(loc="upper right", fontsize=16)
+    legend_s = ax_s.legend(loc="upper right", fontsize=16)
+    if hasattr(legend_s, "legend_handles"):
+        legend_s_handles = legend_s.legend_handles
+    elif hasattr(legend_s, "legendHandles"):
+        legend_s_handles = legend_s.legendHandles
+    else:
+        legend_s_handles = []
+    for h in legend_s_handles:
+        h.set_linewidth(3.0)
+        h.set_alpha(1.0)
     ax_s.grid(True, alpha=0.3)
     
     # --- Row 1: Controls ---
@@ -675,7 +684,16 @@ def plot_policy_trajectories(traj_mm, traj_zero, dt, dx, du, save_path=None,
     ax_u.set_ylabel("Control", fontsize=16)
     ax_u.set_xlabel("Time (s)", fontsize=16)
     # ax_u.set_title("Control trajectories", fontsize=16)
-    ax_u.legend(loc="upper right", fontsize=16)
+    legend_u = ax_u.legend(loc="upper right", fontsize=16)
+    if hasattr(legend_u, "legend_handles"):
+        legend_u_handles = legend_u.legend_handles
+    elif hasattr(legend_u, "legendHandles"):
+        legend_u_handles = legend_u.legendHandles
+    else:
+        legend_u_handles = []
+    for h in legend_u_handles:
+        h.set_linewidth(3.0)
+        h.set_alpha(1.0)
     ax_u.grid(True, alpha=0.3)
     
     # Build suptitle with average costs if available
