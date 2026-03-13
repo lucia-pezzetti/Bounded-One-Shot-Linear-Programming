@@ -16,7 +16,6 @@ for N in "${N_VALUES[@]}"; do
     echo "=========================================="
     
     # Run the Python script with the current N value
-    # Add other arguments as needed (you can modify these)
     python bounded_lp_vs_dim_nonlinear.py \
         --N "$N" \
         --dims 2,4,6,8,10 \
@@ -30,8 +29,6 @@ for N in "${N_VALUES[@]}"; do
         echo "✓ Successfully completed N = $N"
     else
         echo "✗ Failed for N = $N"
-        # Uncomment the next line if you want to stop on first error:
-        # exit 1
     fi
     
     echo ""

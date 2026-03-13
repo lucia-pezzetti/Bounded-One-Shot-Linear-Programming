@@ -4,7 +4,7 @@ import cvxpy as cp
 from scipy import sparse
 from scipy.linalg import solve_discrete_are
 from polynomial_features import FilteredPolynomialFeatures, StateOnlyPolynomialFeatures
-from dynamical_systems import point_mass_cubic_drag, point_mass_cubic_drag_2du, point_mass_cubic_drag_1du
+from dynamical_systems import point_mass_cubic_drag, point_mass_cubic_drag_1du
 from config import (
     GAMMA, M_POINT_MASS_2D, K_POINT_MASS_2D, C_POINT_MASS_2D, DT_POINT_MASS_2D,
     RHO_POINT_MASS_2D, C_P_POINT_MASS, C_V_POINT_MASS,
@@ -36,7 +36,7 @@ def sample_system_params(seed, m0=M_POINT_MASS_2D, k0=K_POINT_MASS_2D, c0=C_POIN
     Returns:
         m, k, c: Sampled physical parameters
     """
-    rng = np.random.RandomState(seed + 99999)  # Offset to avoid collision with data sampling
+    rng = np.random.RandomState(seed + 99999)
     
     # Sample from LogNormal: X = exp(μ + σ*Z) where Z ~ N(0,1)
     # With μ = log(X0) - 0.5*σ² to ensure E[X] = X0
@@ -47,9 +47,9 @@ def sample_system_params(seed, m0=M_POINT_MASS_2D, k0=K_POINT_MASS_2D, c0=C_POIN
     return m, k, c
 
 
-def sample_modal_params(seed, n, du=2, alpha0=2.0, alpha_half_width=0.2):
+def sample_modal_params(seed, n, du=1, alpha0=2.0, alpha_half_width=0.2):
     """
-    Sample modal parameters for point_mass_cubic_drag_2du / _1du.
+    Sample modal parameters for point_mass_cubic_drag_1du.
 
     Randomises:
       • Q_modes  ~ Haar(O(n))        — random orthogonal modal basis
@@ -59,7 +59,7 @@ def sample_modal_params(seed, n, du=2, alpha0=2.0, alpha_half_width=0.2):
     Args:
         seed: Random seed for reproducibility
         n: Position/velocity dimension (number of DOFs)
-        du: Number of control inputs (1 or 2)
+        du: Number of control inputs (currently only 1 is supported here)
         alpha0: Centre of the alpha range (default 2.0)
         alpha_half_width: Half-width of the alpha range (default 0.2)
 
@@ -68,7 +68,7 @@ def sample_modal_params(seed, n, du=2, alpha0=2.0, alpha_half_width=0.2):
         B: (n, du) dense input map with unit-norm columns
         alpha: Sampled modal growth exponent
     """
-    rng = np.random.RandomState(seed + 77777)  # Offset to avoid collision
+    rng = np.random.RandomState(seed + 77777)
 
     # --- Q_modes ~ Haar(O(n)) via QR of Gaussian matrix with sign correction ---
     H = rng.randn(n, n)
@@ -77,8 +77,6 @@ def sample_modal_params(seed, n, du=2, alpha0=2.0, alpha_half_width=0.2):
     Q = Q @ np.diag(np.sign(np.diag(R)))
 
     # --- B: dense random actuation directions ---
-    # Scale so the control authority is comparable to (but doesn't dominate)
-    # the natural spring + drag forces.  ||B|| = B_NORM.
     B_NORM = 5.0
     B = rng.randn(n, du)
     col_norms = np.linalg.norm(B, axis=0, keepdims=True)
@@ -103,13 +101,13 @@ def create_point_mass_system(dx, N=0, M=0, mass=None, k=None, c=None, fixed_du=0
         mass: Mass parameter (if None, uses config default M_POINT_MASS_2D)
         k: Spring constant / stiffness scale k0 (if None, uses config default K_POINT_MASS_2D)
         c: Damping coefficient (if None, uses config default C_POINT_MASS_2D)
-        fixed_du: 0 = fully actuated (du=n), 1 = du=1, 2 = du=2 (under-actuated).
+        fixed_du: 0 = fully actuated (du=n), 1 = du=1 (under-actuated).
         Q_modes: (n, n) orthogonal modal basis for the fixed-du variants (if None, uses class default DCT-II)
         B_modal: (n, du) input map for the fixed-du variants (if None, uses class default)
         alpha: Modal growth exponent for the fixed-du variants (if None, uses class default 2.0)
     
     Returns:
-        system: point_mass_cubic_drag, point_mass_cubic_drag_1du, or point_mass_cubic_drag_2du instance
+        system: point_mass_cubic_drag or point_mass_cubic_drag_1du instance
         C_cost: Cost matrix (dx, dx)
     """
     if dx % 2 != 0:
@@ -140,8 +138,8 @@ def create_point_mass_system(dx, N=0, M=0, mass=None, k=None, c=None, fixed_du=0
         M=M,
     )
     
-    if fixed_du in (1, 2):
-        # Under-actuated: du=1 or du=2 with modal coupling (K = Q Λ Q^T)
+    if fixed_du == 1:
+        # Under-actuated: du=1 with modal coupling (K = Q Λ Q^T)
         # Compute k0 so that the highest modal frequency equals OMEGA_MAX:
         #   lambda_n = k0 * n^alpha  =>  omega_n = sqrt(lambda_n / m) = OMEGA_MAX
         #   => k0 = m * OMEGA_MAX^2 / n^alpha
@@ -156,19 +154,17 @@ def create_point_mass_system(dx, N=0, M=0, mass=None, k=None, c=None, fixed_du=0
         if alpha is not None:
             modal_kwargs["alpha"] = alpha
         
-        if fixed_du == 1:
-            system = point_mass_cubic_drag_1du(**modal_kwargs, **common_kwargs)
-            class_name = "point_mass_cubic_drag_1du"
-        else:
-            system = point_mass_cubic_drag_2du(**modal_kwargs, **common_kwargs)
-            class_name = "point_mass_cubic_drag_2du"
+        system = point_mass_cubic_drag_1du(**modal_kwargs, **common_kwargs)
+        class_name = "point_mass_cubic_drag_1du"
         
         print(f"  Using {class_name}: dx={dx}, du={fixed_du}, n={n}"
               f", k0={k0:.4f}, alpha={alpha_val:.2f}"
               f", omega_max={np.sqrt(system.lambdas[-1]/mass_val):.2f}")
-    else:
+    elif fixed_du == 0:
         # Fully actuated: du=n
         system = point_mass_cubic_drag(m_u=n, B=None, k=k_val, **common_kwargs)
+    else:
+        raise ValueError(f"Unsupported fixed_du={fixed_du}. Allowed values are 0 (fully actuated) or 1.")
     
     return system, C_cost
 
@@ -299,10 +295,6 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed,
         cp.sum(lambda_var) == 1,
     ]
     
-    # Objective: make C ≈ I
-    I_d = cp.Constant(sparse.eye(d, format="csr"))
-    C_approx = sum_PyPyT
-    # objective = cp.Minimize(cp.norm(C_approx - I_d, "fro"))
     objective = cp.Minimize(cp.norm(moment_match, "fro"))
     
     prob = cp.Problem(objective, constraints)
@@ -323,7 +315,7 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed,
         return "failed_stage1", status1, None, None, None, None
     
     mu = mu_var.value
-    # C_val = P_y^T Diag(mu) P_y  (vectorised)
+    # C_val = P_y^T Diag(mu) P_y
     P_y_weighted = P_y * np.sqrt(mu)[:, None]          # (M, d)
     C_val = P_y_weighted.T @ P_y_weighted               # (d, d)
     
@@ -337,7 +329,6 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed,
     if A_sym is None:
         A_sym, d, d_sym = _build_sym_constraint_matrix(P_z, P_z_next, gamma)
     
-    # Objective vector in symmetric parameterisation
     c_sym = _sym_vec(C_val, d)
     
     s = cp.Variable(d_sym)
@@ -357,7 +348,6 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed,
         print(f"    MOSEK failed in Stage 2: {e}")
         return "solver_error", status1, None, None, None, None
     
-    # Return the learned Q matrix, polynomial features, and optimization values if successful
     if status2 in ("optimal", "optimal_inaccurate"):
         Q_learned = _sym_to_full(s.value, d)
         E_Q_learned = prob_lp.value
@@ -397,7 +387,6 @@ def solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, du,
 # -------------------------
 # Monte Carlo Policy Evaluation
 # -------------------------
-
 def extract_greedy_gain(Q_learned, dx, du):
     """
     Extract the greedy policy gain from a learned Q-matrix.
@@ -414,7 +403,7 @@ def extract_greedy_gain(Q_learned, dx, du):
     
     Args:
         Q_learned: (d, d) learned Q-matrix where d = n_phi + du
-        dx: state dimension (used only for informational purposes)
+        dx: state dimension
         du: input dimension
         
     Returns:
@@ -426,7 +415,7 @@ def extract_greedy_gain(Q_learned, dx, du):
     d = Q_learned.shape[0]
     n_phi = d - du  # number of state polynomial features
     
-    # Symmetrise (the LP has no symmetry constraint)
+    # Symmetrise
     Q_sym = 0.5 * (Q_learned + Q_learned.T)
     
     # Partition: last du rows/cols correspond to u
@@ -434,9 +423,7 @@ def extract_greedy_gain(Q_learned, dx, du):
     M_uu = Q_sym[n_phi:, n_phi:]   # (du, du)
     
     try:
-        # Positive gain: K = M_uu^{-1} M_xu^T
-        # Convention: policy is u = -K @ φ_x(x) (matching LQR convention)
-        K = np.linalg.solve(M_uu, M_xu.T)  # (du, n_phi)
+        K = np.linalg.solve(M_uu, M_xu.T)
         if not np.isfinite(K).all():
             return None
         return K
@@ -449,7 +436,7 @@ def compute_lqr_gain(system, gamma):
     Compute the LQR gain for the linearised system.
     
     Args:
-        system: point_mass_cubic_drag or point_mass_cubic_drag_2du instance
+        system: point_mass_cubic_drag or point_mass_cubic_drag_1du instance
         gamma: discount factor
         
     Returns:
@@ -584,7 +571,6 @@ def mc_policy_cost(system, K, gamma, n_rollouts=200, T=20000, seed=0,
         X_new[:, :n_dof] = P + dt * V
         X_new[:, n_dof:] = V + dt * V_dot
         
-        # Check for blow-up
         new_blown = np.any(np.abs(X_new) > 1e6, axis=1)
         just_blown = new_blown & ~blown
         if np.any(just_blown):
@@ -609,7 +595,6 @@ def mc_policy_cost(system, K, gamma, n_rollouts=200, T=20000, seed=0,
     
     trajectories = None
     if n_rec > 0:
-        # Also store the individual costs of the recorded trajectories
         trajectories = {
             "X": X_hist,
             "U": U_hist,
@@ -694,14 +679,7 @@ def plot_policy_trajectories(traj_mm, traj_zero, dt, dx, du, save_path=None,
     ax_u.grid(True, alpha=0.3)
     
     # Build suptitle with average costs if available
-    _title = f"Trajectory comparison (dx={dx}, du={du})"
-    # cost_parts = []
-    # if mm_cost is not None:
-    #     cost_parts.append(f"MM avg cost = {mm_cost[0]:.2f} ± {mm_cost[1]:.2f}")
-    # if zero_cost is not None:
-    #     cost_parts.append(f"Zero-input avg cost = {zero_cost[0]:.2f} ± {zero_cost[1]:.2f}")
-    # if cost_parts:
-    #     _title += "\n" + "  |  ".join(cost_parts)
+    _title = f"Trajectory comparison (n={dx})"
     fig.suptitle(_title, fontsize=16, fontweight='bold')
     fig.tight_layout()
     
@@ -761,20 +739,20 @@ def evaluate_Q_quality(Q_learned, system, dx, du, gamma, seed,
     # State polynomial feature transformer for the nonlinear MM policy
     poly_x = poly.poly_x if poly is not None else None
     
-    # LQR baseline (always linear: u = -K @ x)
+    # LQR baseline
     try:
         K_lqr = compute_lqr_gain(system, gamma)
     except Exception as e:
         print(f"    [eval] LQR gain computation failed: {e}")
         K_lqr = np.zeros((du, dx))  # fallback: zero control
     
-    # Zero-input baseline: K = 0 → u = 0 always
+    # Zero-input baseline
     K_zero = np.zeros((du, dx))
     
     # Decide whether to record trajectories (record all rollouts for plotting)
     n_rec = 200 if plot_trajectories_dir is not None else 0
     
-    # MC rollouts — MM uses nonlinear policy (poly_x), LQR and zero use linear (poly_x=None)
+    # MC rollouts
     mm_mean, mm_std, traj_mm = mc_policy_cost(system, K_mm, gamma, seed=seed,
                                                record_trajectories=n_rec,
                                                poly_x=poly_x)
@@ -797,7 +775,6 @@ def evaluate_Q_quality(Q_learned, system, dx, du, gamma, seed,
         os.makedirs(plot_trajectories_dir, exist_ok=True)
         save_path = os.path.join(plot_trajectories_dir,
                                  f"trajectories_dx{dx}_seed{seed}.pdf")
-        # Use costs of the *plotted* trajectories (not the full MC estimate)
         mm_traj_costs = traj_mm["costs"]
         zero_traj_costs = traj_zero["costs"]
         plot_policy_trajectories(traj_mm, traj_zero, system.delta_t, dx, du,
@@ -834,7 +811,7 @@ def run_one(seed, dx, N, gamma, M_offline, degree, exclude_u_squared=False,
         degree: Polynomial feature degree
         exclude_u_squared: Exclude u^2 terms from features
         randomize_system: If True, sample m, k, c from LogNormal distributions per seed
-        fixed_du: 0 = fully actuated (du=n), 1 = du=1, 2 = du=2 (under-actuated)
+        fixed_du: 0 = fully actuated (du=n), 1 = du=1 (under-actuated)
         plot_trajectories_dir: if not None, save trajectory comparison plots to this directory
     """
     timings = {}
@@ -848,14 +825,13 @@ def run_one(seed, dx, N, gamma, M_offline, degree, exclude_u_squared=False,
         mass, k, c = sample_system_params(seed)
         print(f"  Sampled params: m={mass:.3f}, k={k:.3f}, c={c:.3f}")
     else:
-        mass, k, c = None, None, None  # Use defaults
+        mass, k, c = None, None, None
     
     # Sample modal parameters for the fixed-du variants (Q_modes, B, alpha)
     n = dx // 2
     Q_modes, B_modal, alpha = None, None, None
-    if randomize_system and fixed_du in (1, 2):
+    if randomize_system and fixed_du == 1:
         Q_modes, B_modal, alpha = sample_modal_params(seed, n, du=fixed_du)
-        # print(f"  Sampled modal: alpha={alpha:.3f}, B_norms={np.linalg.norm(B_modal, axis=0).tolist()}")
     
     # Create system for this dimension (with optional sampled parameters)
     t0 = time.perf_counter()
@@ -900,7 +876,6 @@ def run_one(seed, dx, N, gamma, M_offline, degree, exclude_u_squared=False,
     t0 = time.perf_counter()
     A_sym, d_feat, d_sym = _build_sym_constraint_matrix(P_z, P_z_next, gamma)
     timings["constraint_matrix"] = time.perf_counter() - t0
-    # print(f"  Constraint matrix: N={N}, d={d_feat}, d_sym={d_sym} (was d²={d_feat**2})")
     
     # Solve both methods using the same polynomial features and constraint matrix
     t0 = time.perf_counter()
@@ -947,8 +922,7 @@ def run_one(seed, dx, N, gamma, M_offline, degree, exclude_u_squared=False,
     if randomize_system:
         result["mass"] = float(system.m)
         result["c"] = float(system.c)
-        if fixed_du in (1, 2):
-            # k0 is derived from (m, omega_max, n, alpha); store it for traceability
+        if fixed_du == 1:
             n = dx // 2
             alpha_val = alpha if alpha is not None else 2.0
             result["k0"] = float(system.m * OMEGA_MAX_POINT_MASS**2 / (n ** alpha_val))
@@ -958,10 +932,7 @@ def run_one(seed, dx, N, gamma, M_offline, degree, exclude_u_squared=False,
     
     # Store timing metrics
     timings["total"] = time.perf_counter() - t_total_start
-    result["timings"] = timings
-    timing_str = "  ".join(f"{k}: {v:.2f}s" for k, v in timings.items())
-    # print(f"  [timing] {timing_str}")
-    
+    result["timings"] = timings    
     return result
 
 def sweep_over_dims(dims, seeds, N, gamma, M_offline, degree, exclude_u_squared=False,
@@ -999,11 +970,13 @@ if __name__ == "__main__":
     parser.add_argument("--degree", type=int, default=2, help="Polynomial feature degree (default: 1)")
     parser.add_argument("--exclude_u_squared", action="store_true", help="Exclude u^2 terms from polynomial features (for degree 2)")
     parser.add_argument("--randomize_system", action="store_true", help="Sample m, k, c from LogNormal distributions per seed (default: use fixed values)")
-    parser.add_argument("--fixed_du", type=int, default=1, help="Fixed control dimension: 0 = fully actuated (du=n), 1 = du=1, 2 = du=2. Default: 0.")
+    parser.add_argument("--fixed_du", type=int, default=1, help="Fixed control dimension: 0 = fully actuated (du=n), 1 = du=1. Default: 1.")
     parser.add_argument("--plot_trajectories", action="store_true", help="Save trajectory comparison plots (MM vs LQR) for each bounded run")
     parser.add_argument("--out_json", type=str, default=None, help="Raw results JSON (if None, auto-generated with N)")
     parser.add_argument("--plot_dir", type=str, default=None, help="Plot filename (if None, auto-generated with N)")
     args = parser.parse_args()
+    if args.fixed_du not in (0, 1):
+        raise ValueError(f"--fixed_du must be 0 or 1 (got {args.fixed_du})")
     
     # Parse dimensions
     if args.dims.strip():
@@ -1036,7 +1009,7 @@ if __name__ == "__main__":
     
     df = pd.DataFrame(results)
     
-    # --- Boundedness aggregation ---
+    # Boundedness aggregation
     agg = df.groupby("dx").agg(
         moment_bounded_mean=("moment_matching_bounded", "mean"),
         identity_bounded_mean=("identity_bounded", "mean"),
@@ -1045,7 +1018,7 @@ if __name__ == "__main__":
     agg["moment_bounded_pct"] = 100 * agg["moment_bounded_mean"]
     agg["identity_bounded_pct"] = 100 * agg["identity_bounded_mean"]
     
-    # --- MC policy cost aggregation (only for bounded MM runs) ---
+    # MC policy cost aggregation (only for bounded MM runs)
     has_eval = "cost_norm_diff" in df.columns and df["cost_norm_diff"].notna().any()
     if has_eval:
         eval_df = df.dropna(subset=["cost_norm_diff"])
@@ -1085,44 +1058,5 @@ if __name__ == "__main__":
     print("\n=== Average Timing per (dx, seed) [seconds] ===")
     print(timing_agg.to_string(index=False, float_format=lambda v: f"{v:8.2f}"))
     
-    # --- Plotting ---
-    n_panels = 2 if has_eval else 1
-    fig, axes = plt.subplots(1, n_panels, figsize=(8 * n_panels, 6))
-    if n_panels == 1:
-        axes = [axes]
-    
-    # Panel 1: Boundedness percentages
-    ax1 = axes[0]
-    ax1.plot(agg["dx"], agg["moment_bounded_pct"],
-                    marker="o", label="Moment matching", color="blue")
-    ax1.plot(agg["dx"], agg["identity_bounded_pct"],
-                    marker="s", label="Identity covariance", color="red")
-    ax1.set_xlabel("State dimension (dx)")
-    ax1.set_ylabel("Bounded LPs (%)")
-    ax1.set_title("Bounded LP percentage vs dimension")
-    ax1.legend()
-    ax1.grid(True)
-    
-    # Panel 2: MC normalized cost difference (J_MM - J_LQR) / J_LQR
-    if has_eval:
-        ax2 = axes[1]
-        mask = agg["cost_norm_diff_mean"].notna()
-        dx_vals = agg.loc[mask, "dx"].values
-        mean_vals = agg.loc[mask, "cost_norm_diff_mean"].values
-        std_vals = agg.loc[mask, "cost_norm_diff_std"].fillna(0).values
-        ax2.plot(dx_vals, mean_vals, marker="D", color="green",
-                 label=r"$(J_{\mathrm{MM}} - J_{\mathrm{LQR}}) / J_{\mathrm{LQR}}$")
-        ax2.fill_between(dx_vals, mean_vals - std_vals, mean_vals + std_vals,
-                         color="green", alpha=0.2)
-        ax2.set_xlabel("State dimension (dx)")
-        ax2.set_ylabel("Normalized cost difference")
-        ax2.set_title("MC policy cost: MM vs LQR (linearised)")
-        ax2.legend()
-        ax2.grid(True)
-    
-    fig.suptitle("Point Mass with Cubic Drag", fontsize=14, y=1.02)
-    plt.tight_layout()
-    plt.savefig(args.plot_dir, dpi=150, bbox_inches="tight")
     print("\nSaved:", args.out_json)
     print("Aggregated results saved:", agg_json_name)
-    print("Figures saved in", args.plot_dir)

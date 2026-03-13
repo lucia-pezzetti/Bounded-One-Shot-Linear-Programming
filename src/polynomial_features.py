@@ -27,8 +27,8 @@ class FilteredPolynomialFeatures(BaseEstimator, TransformerMixin):
         Args:
             degree: Polynomial degree
             include_bias: Whether to include bias term
-            dx: Number of state dimensions (required)
-            du: Number of action dimensions (required)
+            dx: Number of state dimensions
+            du: Number of action dimensions
         """
         if dx is None or du is None:
             raise ValueError("dx and du must be specified")
@@ -93,9 +93,6 @@ class FilteredPolynomialFeatures(BaseEstimator, TransformerMixin):
 class PolynomialFeatureScaler:
     """
     Simple polynomial feature scaler that generates polynomial features excluding u^2 terms.
-    
-    This is a compatibility wrapper that matches the interface used in the codebase.
-    It generates polynomial features without any scaling.
     """
     
     def __init__(self, degree=2, scaling_method='none', dx=None, du=None, exclude_u_squared=False):
@@ -105,8 +102,8 @@ class PolynomialFeatureScaler:
         Args:
             degree: Polynomial degree
             scaling_method: Ignored (no scaling is applied)
-            dx: Number of state dimensions (required)
-            du: Number of action dimensions (required)
+            dx: Number of state dimensions
+            du: Number of action dimensions
             exclude_u_squared: Whether to exclude u^2 terms (default: True, always excludes)
         """
         if dx is None or du is None:
