@@ -40,7 +40,7 @@ To reproduce the results in the paper run
 The obtained results are reported in the following plots
 
 <p align="center">
-  <img src="figures/boundedness_heatmap_dx_vs_N.png" height="250" style="vertical-align: middle;">
+  <img src="figures/boundedness_heatmap_n_vs_N.png" height="250" style="vertical-align: middle;">
   <img src="figures/policy_value_comparison_N500_3000.png" height="250" style="vertical-align: middle;">
 </p>
 
@@ -123,8 +123,8 @@ To reproduce the results in the paper run
 The obtained results are reported in the following plots
 
 <p align="center">
-  <img src="figures/boundedness_heatmap_nonlinear_dx_vs_N.png" height="250" style="vertical-align: middle;">
-  <img src="figures/trajectories_dx4.png" height="250" style="vertical-align: middle;">
+  <img src="figures/boundedness_heatmap_nonlinear_n_vs_N.png" height="250" style="vertical-align: middle;">
+  <img src="figures/trajectories_n4.png" height="250" style="vertical-align: middle;">
 </p>
 
 Left: Empirical boundedness rate of the linear programs as a function of the state dimension $dx$ (and the the size of the decision variable matrix in the LP $d$) and the number of samples $N$. Each entry corresponds to the percentage of random problem instances (out of 10 seeds) for which the corresponding LP admits a bounded solution. The left panel shows the proposed moment-matching formulation, while the right panel reports the baseline LP using as direction a fixed identity covariance structure. Polynomial features with degree 2 in $x$ have been used.
@@ -134,7 +134,7 @@ Right: Representative closed-loop trajectories for $dx=4$, $N = 5000, M =500, $m
 The baseline approach requires solving only the LP~\eqref{data-driven_LP} but often results in unbounded problems. The proposed moment-matching LP adds the cost of solving~\eqref{ifcond}, but substantially enlarges the regime in which the LP admits a finite solution. For the tested dimensions, this preprocessing overhead is moderate compared to the benefit of guaranteed boundedness. The following image reports the averaged solving times across the bounded instances. We note that the implementation could likely be further optimized, potentially leading to reduced computation times.
 
 <p align="center">
-  <img src="figures/lp_solve_time_heatmap_nonlinear_dx_vs_N_fixed_du_1_degree_2.png" height="250" style="vertical-align: middle;">
+  <img src="figures/lp_solve_time_heatmap_nonlinear_n_vs_N.png" height="250" style="vertical-align: middle;">
 </p>
 
 
