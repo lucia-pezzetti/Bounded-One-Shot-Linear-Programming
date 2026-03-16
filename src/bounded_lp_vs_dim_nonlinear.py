@@ -384,6 +384,131 @@ def solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, du,
         print(f"    MOSEK failed in Identity LP: {e}")
         return "solver_error"
 
+def gaussian_relevance_matrix_stateonly_degree2(dx, du=1, include_bias=False):
+    """
+    Build M = E[p(z) p(z)^T] for z = (x, u) ~ N(0, I),
+    with scalar u and
+
+        p(z) = [p'(x), u]^T
+
+    where p'(x) contains all monomials in x of degree <= 2.
+
+    Assumed ordering:
+        include_bias=False:
+            [x_1,...,x_dx, x_1^2,...,x_dx^2, x_1 x_2, x_1 x_3, ..., x_{dx-1} x_dx, u]
+
+        include_bias=True:
+            [1, x_1,...,x_dx, x_1^2,...,x_dx^2, x_1 x_2, ..., x_{dx-1} x_dx, u]
+
+    Returns:
+        M: (d, d) symmetric relevance matrix
+    """
+    if du != 1:
+        raise ValueError(f"This helper assumes scalar u (du=1), got du={du}.")
+
+    n_lin = dx
+    n_sq = dx
+    n_cross = dx * (dx - 1) // 2
+
+    if include_bias:
+        d = 1 + n_lin + n_sq + n_cross + 1
+        M = np.zeros((d, d))
+
+        i0 = 0
+        i_lin = slice(1, 1 + n_lin)
+        i_sq = slice(i_lin.stop, i_lin.stop + n_sq)
+        i_cross = slice(i_sq.stop, i_sq.stop + n_cross)
+        i_u = d - 1
+
+        # E[1 * 1]
+        M[i0, i0] = 1.0
+
+        # E[1 * x_i^2] = 1
+        M[i0, i_sq] = 1.0
+        M[i_sq, i0] = 1.0
+
+        # E[x x^T] = I
+        M[i_lin, i_lin] = np.eye(n_lin)
+
+        # E[s s^T], s_i = x_i^2:
+        # diag = 3, off-diag = 1
+        M[i_sq, i_sq] = np.ones((n_sq, n_sq)) + 2.0 * np.eye(n_sq)
+
+        # E[r r^T] = I for r = [x_i x_j]_{i<j}
+        if n_cross > 0:
+            M[i_cross, i_cross] = np.eye(n_cross)
+
+        # E[u^2] = 1
+        M[i_u, i_u] = 1.0
+
+        return M
+
+    else:
+        d = n_lin + n_sq + n_cross + 1
+        M = np.zeros((d, d))
+
+        i_lin = slice(0, n_lin)
+        i_sq = slice(i_lin.stop, i_lin.stop + n_sq)
+        i_cross = slice(i_sq.stop, i_sq.stop + n_cross)
+        i_u = d - 1
+
+        # E[x x^T] = I
+        M[i_lin, i_lin] = np.eye(n_lin)
+
+        # E[s s^T], s_i = x_i^2:
+        # diag = 3, off-diag = 1
+        M[i_sq, i_sq] = np.ones((n_sq, n_sq)) + 2.0 * np.eye(n_sq)
+
+        # E[r r^T] = I
+        if n_cross > 0:
+            M[i_cross, i_cross] = np.eye(n_cross)
+
+        # E[u^2] = 1
+        M[i_u, i_u] = 1.0
+
+        return M
+
+def solve_gaussian_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, du,
+                     A_sym=None, d=None, d_sym=None, include_bias=False):
+    """
+    Gaussian-relevance baseline:
+        maximize trace(M @ Q)
+        s.t.     trace(Q @ M_i) <= l_i  for all i
+
+    where
+        M = E[p(z)p(z)^T],   z ~ N(0, I),
+    and p(z) = [p'(x), u]^T with p'(x) containing all state monomials of degree <= 2.
+
+    Assumes scalar u and degree-2 StateOnlyPolynomialFeatures-style ordering.
+    """
+    if A_sym is None:
+        A_sym, d, d_sym = _build_sym_constraint_matrix(P_z, P_z_next, gamma)
+
+    M_gauss = gaussian_relevance_matrix_stateonly_degree2(
+        dx=dx, du=du, include_bias=include_bias
+    )
+
+    if M_gauss.shape != (d, d):
+        raise ValueError(
+            f"Gaussian relevance matrix shape mismatch: M has shape {M_gauss.shape}, "
+            f"but feature dimension is d={d}. "
+            f"Check include_bias / feature ordering / polynomial degree."
+        )
+
+    c_sym = _sym_vec(M_gauss, d)
+
+    s = cp.Variable(d_sym)
+    cons = [A_sym @ s <= L_xu]
+    objective = cp.Maximize(c_sym @ s)
+    prob = cp.Problem(objective, cons)
+
+    try:
+        prob.solve(solver=cp.MOSEK, verbose=False)
+        return prob.status
+    except Exception as e:
+        print(f"    MOSEK failed in Gaussian LP: {e}")
+        return "solver_error"
+
 # -------------------------
 # Monte Carlo Policy Evaluation
 # -------------------------
@@ -903,8 +1028,11 @@ def run_one(seed, dx, N, gamma, M_offline, degree, exclude_u_squared=False,
     timings["moment_matching_lp"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    status_id = solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, system.N_u,
-                                 A_sym=A_sym, d=d_feat, d_sym=d_sym)
+    # status_id = solve_identity_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, system.N_u,
+    #                              A_sym=A_sym, d=d_feat, d_sym=d_sym)
+    status_id = solve_gaussian_Q(P_z, P_z_next, L_xu, gamma, N, seed, dx, system.N_u,
+                             A_sym=A_sym, d=d_feat, d_sym=d_sym,
+                             include_bias=False)
     timings["identity_lp"] = time.perf_counter() - t0
     
     def is_bounded(status):
