@@ -40,7 +40,7 @@ To reproduce the results in the paper run
 The obtained results are reported in the following plots
 
 <p align="center">
-  <img src="figures/boundedness_heatmap_n_vs_N.png" height="250" style="vertical-align: middle;">
+  <img src="figures/boundedness_isolines_linear.png" height="250" style="vertical-align: middle;">
   <img src="figures/policy_value_comparison_N500_3000.png" height="250" style="vertical-align: middle;">
 </p>
 
@@ -123,7 +123,7 @@ To reproduce the results in the paper run
 The obtained results are reported in the following plots
 
 <p align="center">
-  <img src="figures/boundedness_heatmap_nonlinear_n_vs_N.png" height="250" style="vertical-align: middle;">
+  <img src="figures/boundedness_isolines_nonlinear.png" height="250" style="vertical-align: middle;">
   <img src="figures/trajectories_n4.png" height="250" style="vertical-align: middle;">
 </p>
 
