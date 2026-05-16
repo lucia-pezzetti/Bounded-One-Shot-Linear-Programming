@@ -41,7 +41,7 @@ The obtained results are reported in the following plots
 
 <p align="center">
   <img src="figures/boundedness_isolines_linear.png" height="250" style="vertical-align: middle;">
-  <img src="figures/policy_value_comparison_N500_3000.png" height="250" style="vertical-align: middle;">
+  <img src="figures/moment_matching_performance.png" height="250" style="vertical-align: middle;">
 </p>
 
 Left: Empirical boundedness rate of the linear programs as a function of the state dimension $n$ (and the the size of the decision variable matrix in the LP $d$) and the number of samples $N$. Each entry corresponds to the percentage of random problem instances (out of 10 seeds) for which the corresponding LP admits a bounded solution. The left panel shows the proposed *moment-matching* formulation, while the right panel reports the baseline using as measure $c$ a standard Gaussian distribution. Note that, since we are using quadratic polynomial features, this is equivalent to using as direction of the LP a fixed identity covariance structure, $\int_{\mathbf{Z}} \phi (z) c(dz) = \text{vec}(I)$.
