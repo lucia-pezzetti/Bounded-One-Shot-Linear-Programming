@@ -124,7 +124,7 @@ The obtained results are reported in the following plots
 
 <p align="center">
   <img src="figures/boundedness_isolines_nonlinear.png" height="250" style="vertical-align: middle;">
-  <img src="figures/trajectories_n4.png" height="250" style="vertical-align: middle;">
+  <img src="figures/trajectories_n4_horizontal.png" height="250" style="vertical-align: middle;">
 </p>
 
 Left: Empirical boundedness rate of the linear programs as a function of the state dimension $n$ (and the the size of the decision variable matrix in the LP $d$) and the number of samples $N$. Each entry corresponds to the percentage of random problem instances (out of 10 seeds) for which the corresponding LP admits a bounded solution. The left panel shows the proposed *moment-matching* formulation, while the right panel reports the baseline LP using as measure $c$ a standard Gaussian distribution. Polynomial features $\phi(x, u)$ with degree 4 in $x$, and $2$ in $u$ have been used.
