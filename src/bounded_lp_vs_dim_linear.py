@@ -629,16 +629,13 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
     if status1 not in ("optimal", "optimal_inaccurate"):
         return "failed_stage1", status1, None, None, None, None
 
-    # Compute C_val
     mu = mu_var.value
-    # C_val = P_y^T Diag(mu) P_y
-    # C_val = (P_y.T @ (mu[:, None] * P_y))
-    C_val = 0 
-    for i in range(M):
-        C_val += mu[i] * np.outer(P_y[i], P_y[i])
+    # C_val = P_y^T Diag(mu) P_y = (sqrt(mu) ⊙ P_y)^T (sqrt(mu) ⊙ P_y)
+    P_y_weighted = P_y * np.sqrt(mu)[:, None]
+    C_val = P_y_weighted.T @ P_y_weighted
 
     # -------------------------
-    # Stage 2 (LP):  maximize trace(C_val @ Q)
+    # Stage 2 (LP):  maximize trace(Q @ C_val)
     # s.t. forall i:  trace(Q @ (p_i p_i^T - γ p^+_i p^+_i^T)) <= l(x_i,u_i)
     # -------------------------
     Q = cp.Variable((d, d))
@@ -651,13 +648,8 @@ def solve_moment_matching_Q(P_z, P_z_next, P_y, L_xu, gamma, N, M, seed):
         Mi = np.outer(p, p) - gamma * np.outer(pn, pn)
         cons.append(cp.sum(cp.multiply(Q, Mi)) <= L_xu[i])
 
-    # Objective: sum_i mu_i * <Q, y_i y_i^T>
-    terms = []
-    for i in range(M):
-        yi = P_y[i]
-        terms.append(mu[i] * cp.sum(cp.multiply(Q, np.outer(yi, yi))))
-        
-    obj = cp.Maximize(cp.sum(terms))
+    # Single trace avoids M-term sum (faster CVXPY canonicalization; same math as sum_i mu_i y_i^T Q y_i)
+    obj = cp.Maximize(cp.trace(Q @ cp.Constant(C_val)))
     prob_lp = cp.Problem(obj, cons)
     
     mosek_params = {
@@ -892,11 +884,15 @@ if __name__ == "__main__":
     # Print available dimensions for reference
     print(f"Available dimensions with pre-generated systems: {get_available_dimensions()}")
 
+    # Save JSON outputs in repository-level results_linear/ by default
+    results_dir = Path(__file__).parent.parent / "results_linear"
+    results_dir.mkdir(exist_ok=True)
+
     # Auto-generate filenames with N if not provided
     if args.out_json is None:
-        args.out_json = f"bounded_vs_dim_results_N_{args.N}_rho_{args.rho}.json"
+        args.out_json = str(results_dir / f"bounded_vs_dim_results_N_{args.N}_M_{args.M_offline}.json")
     if args.plot_dir is None:
-        args.plot_dir = f"../figures/bounded_vs_dim_percentages_N_{args.N}_rho_{args.rho}.pdf"
+        args.plot_dir = f"../figures/bounded_vs_dim_percentages_N_{args.N}_M_{args.M_offline}.pdf"
 
     results = sweep_over_dims(dims, seeds, N=args.N, gamma=args.gamma, M_offline=args.M_offline, degree=degree, rho=args.rho, exclude_u_squared=args.exclude_u_squared)
 
@@ -984,7 +980,7 @@ if __name__ == "__main__":
             print(f"Added individual seed values for {metric}")
 
     df.to_json(args.out_json, orient="records", indent=2)
-    agg_json_name = f"bounded_vs_dim_percentages_N_{args.N}_rho_{args.rho}.json"
+    agg_json_name = str(results_dir / f"bounded_vs_dim_percentages_N_{args.N}_M_{args.M_offline}.json")
     agg.to_json(agg_json_name, orient="records", indent=2)
     
     cols = ["dx", "n",

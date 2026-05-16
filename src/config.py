@@ -65,8 +65,8 @@ V_BOUNDS_POINT_MASS = (-8.0, 8.0)    # Velocity bounds (applied to each componen
 U_BOUNDS_POINT_MASS = (-20.0, 20.0)    # Control bounds (applied to each component)
 
 # Focused bounds for test/evaluation sampling (optional)
-P_BOUNDS_POINT_MASS_TEST = (-6.0, 6.0)  # Test position bounds
-V_BOUNDS_POINT_MASS_TEST = (-6.0, 6.0)  # Test velocity bounds
+P_BOUNDS_POINT_MASS_TEST = (-2.0, 2.0)  # Test position bounds
+V_BOUNDS_POINT_MASS_TEST = (-2.0, 2.0)  # Test velocity bounds
 
 # Legacy names for backward compatibility (2D-specific naming)
 P_BOUNDS_POINT_MASS_2D = P_BOUNDS_POINT_MASS
