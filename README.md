@@ -122,10 +122,16 @@ To reproduce the results in the paper run
 ## Results
 The obtained results are reported in the following plots
 
-<p align="center">
-  <img src="figures/boundedness_isolines_nonlinear.png" height="250" style="vertical-align: middle;">
-  <img src="figures/trajectories_n4_horizontal.png" height="250" style="vertical-align: middle;">
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="figures/boundedness_isolines_nonlinear.png" height="250">
+    </td>
+    <td align="center">
+      <img src="figures/trajectories_n4_horizontal.png" height="250">
+    </td>
+  </tr>
+</table>
 
 Left: Empirical boundedness rate of the linear programs as a function of the state dimension $n$ (and the the size of the decision variable matrix in the LP $d$) and the number of samples $N$. Each entry corresponds to the percentage of random problem instances (out of 10 seeds) for which the corresponding LP admits a bounded solution. The left panel shows the proposed *moment-matching* formulation, while the right panel reports the baseline LP using as measure $c$ a standard Gaussian distribution. Polynomial features $\phi(x, u)$ with degree 4 in $x$, and $2$ in $u$ have been used.
 Right: Representative closed-loop trajectories for $n=4$, $N = 5000, M =500, $m=5kg, w_{max} = 5 rad/s$ and cubic drag coefficient $c = 0.5 Ns^2/m^2$. The *moment-matching* (MM) controller achieves a cost of $9675.50 \pm 5069.84$ and reduces oscillations compared to the zero-input baseline, whose obtained cost is $10104.59 \pm 5050.46$.
